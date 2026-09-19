@@ -10,20 +10,19 @@ Only the following fields are permitted in a standard Ethereum transaction reque
 
 ```typescript
 export interface CanonicalTransactionRequest {
-  readonly schemaVersion: "actionproof.request.v1";
-  readonly to: string | null;           // Lowercase 0x + 40 hex chars, or null for deployment
-  readonly from?: string;               // Lowercase 0x + 40 hex chars
-  readonly data: string;                // Lowercase 0x-prefixed hex string (even length)
-  readonly value: string;               // Lowercase hex integer, no leading zeros (e.g. "0x0", "0xde0b6b3a7640000")
-  readonly chainId?: number;            // Integer
-  readonly nonce?: number;              // Integer
-  readonly gas?: string;                // Lowercase hex integer
-  readonly maxFeePerGas?: string;       // Lowercase hex integer
-  readonly maxPriorityFeePerGas?: string; // Lowercase hex integer
-  readonly accessList?: ReadonlyArray<{ // Deterministically sorted
-    readonly address: string;
-    readonly storageKeys: ReadonlyArray<string>;
-  }>;
+  readonly domain: 'actionproof.request.v1';
+  readonly type: SupportedTransactionType; // '0x0' | '0x1' | '0x2'
+  readonly from: `0x${string}`;
+  readonly to: `0x${string}`;
+  readonly value: `0x${string}`;
+  readonly data: `0x${string}`;
+  readonly chainId: number;
+  readonly nonce: `0x${string}` | null;
+  readonly gas: `0x${string}` | null;
+  readonly gasPrice: `0x${string}` | null;
+  readonly maxFeePerGas: `0x${string}` | null;
+  readonly maxPriorityFeePerGas: `0x${string}` | null;
+  readonly accessList: readonly AccessListEntry[];
 }
 ```
 
@@ -85,18 +84,23 @@ If a security tool reads `request.data` during verification and the wallet reads
 ## 4. Deterministic Commitment Hashing
 
 To produce an unforgeable, collision-resistant commitment hash:
-1. The canonical object's keys are sorted in alphabetical order.
-2. The object is serialized to JSON with deterministic indentation and whitespace.
-3. The byte buffer is hashed using SHA-256.
+1. The request is normalized into a `CanonicalTransactionRequest` (`domain: 'actionproof.request.v1'`).
+2. The object is serialized into a deterministic, fixed-order UTF-8 JSON string via `serializeCanonicalRequest()` in `src/canonical/serializer.ts`.
+3. The byte buffer is hashed using standard Ethereum Keccak-256 via `keccak256(stringToBytes(serialized))` from `viem`.
 
 ```typescript
-export function computeCommitment(canonical: CanonicalTransactionRequest): string {
-  const sortedKeys = Object.keys(canonical).sort();
-  const canonicalEntries = sortedKeys.map(key => [key, canonical[key as keyof CanonicalTransactionRequest]]);
-  const serialized = JSON.stringify(Object.fromEntries(canonicalEntries));
-  
-  return createHash("sha256").update(serialized, "utf8").digest("hex");
+// src/canonical/commitment.ts
+export function computeCommitment(tx: unknown, activeChainId = 1): RequestCommitment {
+  const canonical = canonicalize(tx, activeChainId);
+  const serialized = serializeCanonicalRequest(canonical);
+  const hash = keccak256(stringToBytes(serialized));
+
+  return {
+    canonical,
+    serialized,
+    hash,
+  };
 }
 ```
 
-Because every step of this pipeline is deterministic, two identical transaction requests will produce the exact same 64-character hex commitment, regardless of browser engine, key insertion order, or memory layout.
+Because every step of this pipeline is deterministic, two identical transaction requests will produce the exact same 66-character (`0x` + 64 hex characters) Keccak-256 commitment, regardless of browser engine, key insertion order, or memory layout.

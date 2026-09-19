@@ -34,7 +34,7 @@
     2. A stealth `erc20.approve(0xDeadBeef..., 0xffffffffffffffffffffffff)`.
 * **Analysis & Evidence:**
   * Multicall inspector unpacks the batch and discovers the approval subcall.
-  * Policy Engine applies `StealthApprovalRule`.
+  * Policy Engine applies `RULE_02A_NO_EXACT_UNLIMITED_APPROVALS`, `RULE_03_MULTICALL_CALL_INTEGRITY`, and `RULE_04_APPLICATION_INTENT_ALIGNMENT`.
 * **Result:** Verdict is `BLOCKED`. Execution halts immediately. The underlying wallet receives **0** calls.
 
 ### Scenario 3: Post-Verification Destination Mutation (TOCTOU)
