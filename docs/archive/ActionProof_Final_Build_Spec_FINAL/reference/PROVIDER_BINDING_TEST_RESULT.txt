@@ -1,0 +1,31 @@
+ActionProof Provider Binding Reference PoC — UPDATED
+=======================================================
+
+Purpose:
+  Demonstrate the control-flow invariant for the controlled EIP-1193 provider boundary.
+
+Important:
+  This PoC is NOT production code.
+  It uses SHA-256 only because it is dependency-free.
+  Production MUST use Ethereum-compatible Keccak-256.
+
+Updated coverage:
+  TEST1_NORMAL
+  TEST2_DATA_MUTATION
+  TEST3_DESTINATION_MUTATION
+  TEST4_VALUE_MUTATION
+  TEST5_CHAINID_MUTATION
+  TEST6_CANONICAL_EQUIVALENCE
+  TEST7_POST_VERIFICATION_MUTATION (explicit synchronization barrier)
+  TEST8_UNKNOWN_FIELD
+  TEST9_SUPPLIED_GAS_MUTATION
+  TEST10_TYPE_MUTATION
+  TEST11_EIP7702_UNSUPPORTED
+
+Expected:
+  ALL TESTS PASS
+
+Security interpretation:
+  The PoC demonstrates request-binding control flow under a controlled provider boundary.
+  It does NOT prove final wallet signing-payload identity, wallet honesty, DApp integrity,
+  RPC honesty, simulation certainty, or global transaction safety.
