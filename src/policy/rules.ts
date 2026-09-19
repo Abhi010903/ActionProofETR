@@ -12,7 +12,7 @@
  * - Does not eliminate risk from novel smart contract vulnerabilities not detectable via static calldata or single-block simulation.
  */
 
-import type { CompleteEvidence } from '../evidence/types.js';
+import type { CompleteEvidence, CallTreeNode } from '../evidence/types.js';
 
 export interface PolicyRuleOptions {
   blockHighValueApprovals?: boolean;
@@ -33,6 +33,165 @@ export interface PolicyRule {
     reason?: string;
     severity: 'FATAL' | 'WARNING' | 'INFO';
   };
+}
+
+export type DeclaredIntentCategory =
+  | 'SWAP'
+  | 'TRANSFER'
+  | 'SEND'
+  | 'PAYMENT'
+  | 'APPROVAL'
+  | 'CLAIM';
+
+export type DecodedActionCategory =
+  | 'APPROVE'
+  | 'TRANSFER'
+  | 'TRANSFER_FROM'
+  | 'SWAP'
+  | 'UNKNOWN';
+
+// Recognized swap function names already implemented in the project decoder
+export const RECOGNIZED_SWAP_FUNCTIONS: ReadonlySet<string> = new Set([
+  'exactInputSingle',
+  'swapExactTokensForTokens',
+]);
+
+export function detectDeclaredIntentCategories(
+  declaredAction?: string | null
+): DeclaredIntentCategory[] {
+  if (!declaredAction) return [];
+  const lower = declaredAction.toLowerCase();
+  const categories: DeclaredIntentCategory[] = [];
+
+  if (lower.includes('swap')) {
+    categories.push('SWAP');
+  }
+  if (lower.includes('transfer')) {
+    categories.push('TRANSFER');
+  }
+  if (lower.includes('send')) {
+    categories.push('SEND');
+  }
+  if (lower.includes('pay') || lower.includes('payment')) {
+    categories.push('PAYMENT');
+  }
+  if (lower.includes('approve') || lower.includes('approval')) {
+    categories.push('APPROVAL');
+  }
+  if (lower.includes('claim') || lower.includes('reward')) {
+    categories.push('CLAIM');
+  }
+
+  return categories;
+}
+
+export function classifyDecodedAction(
+  functionName?: string | null
+): DecodedActionCategory {
+  if (!functionName) return 'UNKNOWN';
+  if (functionName === 'approve') return 'APPROVE';
+  if (functionName === 'transfer') return 'TRANSFER';
+  if (functionName === 'transferFrom') return 'TRANSFER_FROM';
+  if (RECOGNIZED_SWAP_FUNCTIONS.has(functionName)) return 'SWAP';
+  return 'UNKNOWN';
+}
+
+function isDeclaredCategoryConsistentWithAction(
+  declared: DeclaredIntentCategory,
+  action: DecodedActionCategory
+): boolean {
+  switch (declared) {
+    case 'SWAP':
+      return action === 'SWAP';
+    case 'TRANSFER':
+    case 'SEND':
+    case 'PAYMENT':
+      return action === 'TRANSFER' || action === 'TRANSFER_FROM';
+    case 'APPROVAL':
+      return action === 'APPROVE';
+    case 'CLAIM':
+      return false;
+    default:
+      return false;
+  }
+}
+
+function isContradiction(
+  declared: DeclaredIntentCategory,
+  action: DecodedActionCategory
+): boolean {
+  switch (declared) {
+    case 'SWAP':
+      // SWAP declared + approve decoded
+      // SWAP declared + transfer/transferFrom decoded
+      return (
+        action === 'APPROVE' ||
+        action === 'TRANSFER' ||
+        action === 'TRANSFER_FROM'
+      );
+
+    case 'TRANSFER':
+    case 'SEND':
+    case 'PAYMENT':
+      // TRANSFER/SEND/PAYMENT declared + approve decoded
+      // TRANSFER/SEND/PAYMENT declared + swap decoded
+      return action === 'APPROVE' || action === 'SWAP';
+
+    case 'APPROVAL':
+      // APPROVAL declared + swap/transfer decoded
+      return (
+        action === 'SWAP' ||
+        action === 'TRANSFER' ||
+        action === 'TRANSFER_FROM'
+      );
+
+    case 'CLAIM':
+      // CLAIM is deliberately outside the contradiction matrix
+      return false;
+
+    default:
+      return false;
+  }
+}
+
+interface DecodedActionItem {
+  functionName: string;
+  category: DecodedActionCategory;
+  isSubcall: boolean;
+}
+
+function collectDecodedActions(
+  decode?: Omit<CompleteEvidence, 'policy'>['decode']
+): DecodedActionItem[] {
+  const items: DecodedActionItem[] = [];
+
+  if (decode?.callTree && decode.callTree.length > 0) {
+    function traverse(nodes: CallTreeNode[], isChild: boolean) {
+      for (const node of nodes) {
+        if (node?.functionName) {
+          items.push({
+            functionName: node.functionName,
+            category: classifyDecodedAction(node.functionName),
+            isSubcall: isChild || (node.depth ?? 0) > 0,
+          });
+        }
+        if (node?.children && node.children.length > 0) {
+          traverse(node.children, true);
+        }
+      }
+    }
+    traverse(decode.callTree, false);
+  }
+
+  if (decode?.functionName && !items.some(i => i.functionName === decode.functionName)) {
+    items.unshift({
+      functionName: decode.functionName,
+      category: classifyDecodedAction(decode.functionName),
+      isSubcall: false,
+    });
+  }
+
+  return items;
 }
 
 export const DETERMINISTIC_POLICY_RULES: PolicyRule[] = [
@@ -106,17 +265,45 @@ export const DETERMINISTIC_POLICY_RULES: PolicyRule[] = [
     id: 'RULE_04_APPLICATION_INTENT_ALIGNMENT',
     description: 'Declared application action must align with independently decoded call tree',
     evaluate(evidence) {
-      const declared = evidence.application.declaredAction.toLowerCase();
-      // If declared action claims to be a swap, transfer, send, or payment, but transaction calls approve()
-      const claimsSafeAction = declared.includes('swap') || declared.includes('transfer') || declared.includes('send') || declared.includes('pay');
-      if (claimsSafeAction && evidence.decode.functionName === 'approve') {
-        return {
-          passed: false,
-          verdictContribution: 'BLOCKED',
-          severity: 'FATAL',
-          reason: `Deceptive UI claim: Application claims "${evidence.application.declaredAction}" but transaction calls approve()`,
-        };
+      const declaredText = evidence.application?.declaredAction;
+      const declaredCategories = detectDeclaredIntentCategories(declaredText);
+
+      // If declared action is outside the supported deterministic vocabulary,
+      // RULE_04 passes without claiming semantic alignment.
+      if (declaredCategories.length === 0) {
+        return { passed: true, severity: 'FATAL' };
       }
+
+      const decodedActions = collectDecodedActions(evidence.decode);
+
+      for (const item of decodedActions) {
+        // If this decoded action is explicitly consistent with ANY of the declared categories,
+        // it was declared/expected and is not a contradiction.
+        const isExplicitlyConsistent = declaredCategories.some(cat =>
+          isDeclaredCategoryConsistentWithAction(cat, item.category)
+        );
+
+        if (isExplicitlyConsistent) {
+          continue;
+        }
+
+        // Check if this action contradicts any declared category
+        const contradictingCategory = declaredCategories.find(cat =>
+          isContradiction(cat, item.category)
+        );
+
+        if (contradictingCategory) {
+          return {
+            passed: false,
+            verdictContribution: 'BLOCKED',
+            severity: 'FATAL',
+            reason: `Deceptive UI claim: Application claims "${declaredText}" but ${
+              item.isSubcall ? 'call tree contains contradictory action' : 'transaction calls'
+            } ${item.functionName}()`,
+          };
+        }
+      }
+
       return { passed: true, severity: 'FATAL' };
     },
   },

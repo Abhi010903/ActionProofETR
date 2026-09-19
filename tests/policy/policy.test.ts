@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DeterministicPolicyEngine } from '../../src/policy/index.js';
+import { DeterministicPolicyEngine, DETERMINISTIC_POLICY_RULES } from '../../src/policy/index.js';
 import type { CompleteEvidence } from '../../src/evidence/types.js';
 
 function createMockEvidence(): Omit<CompleteEvidence, 'policy'> {
@@ -231,3 +231,249 @@ describe('Deterministic Policy Engine Tests', () => {
     expect(verdict.warnings.some(w => w.includes('0x12345678'))).toBe(true);
   });
 });
+
+describe('RULE_04 Application Intent Alignment Contradiction Tests', () => {
+  const getRule04 = () => DETERMINISTIC_POLICY_RULES.find(r => r.id === 'RULE_04_APPLICATION_INTENT_ALIGNMENT')!;
+
+  it('swap + approve => BLOCKED', () => {
+    const engine = new DeterministicPolicyEngine();
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Swap 100 USDC -> ETH';
+    evidence.decode.functionName = 'approve';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+      functionName: 'approve',
+      signature: 'approve(...)',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(false);
+    expect(ruleResult.verdictContribution).toBe('BLOCKED');
+    expect(ruleResult.reason).toMatch(/deceptive ui claim/i);
+    expect(ruleResult.reason).toMatch(/approve/i);
+
+    const verdict = engine.evaluate(evidence);
+    expect(verdict.verdict).toBe('BLOCKED');
+  });
+
+  it('transfer + approve => BLOCKED', () => {
+    const engine = new DeterministicPolicyEngine();
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Transfer 10 USDC';
+    evidence.decode.functionName = 'approve';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+      functionName: 'approve',
+      signature: 'approve(...)',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(false);
+    expect(ruleResult.verdictContribution).toBe('BLOCKED');
+    expect(ruleResult.reason).toMatch(/deceptive ui claim/i);
+    expect(ruleResult.reason).toMatch(/approve/i);
+
+    const verdict = engine.evaluate(evidence);
+    expect(verdict.verdict).toBe('BLOCKED');
+  });
+
+  it('payment + approve => BLOCKED', () => {
+    const engine = new DeterministicPolicyEngine();
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Payment for goods';
+    evidence.decode.functionName = 'approve';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+      functionName: 'approve',
+      signature: 'approve(...)',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(false);
+    expect(ruleResult.verdictContribution).toBe('BLOCKED');
+    expect(ruleResult.reason).toMatch(/deceptive ui claim/i);
+    expect(ruleResult.reason).toMatch(/approve/i);
+
+    const verdict = engine.evaluate(evidence);
+    expect(verdict.verdict).toBe('BLOCKED');
+  });
+
+  it('approval + swap => BLOCKED', () => {
+    const engine = new DeterministicPolicyEngine();
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Approve router';
+    evidence.decode.functionName = 'exactInputSingle';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45',
+      functionName: 'exactInputSingle',
+      signature: 'exactInputSingle(...)',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(false);
+    expect(ruleResult.verdictContribution).toBe('BLOCKED');
+    expect(ruleResult.reason).toMatch(/deceptive ui claim/i);
+    expect(ruleResult.reason).toMatch(/exactInputSingle/i);
+
+    const verdict = engine.evaluate(evidence);
+    expect(verdict.verdict).toBe('BLOCKED');
+  });
+
+  it('swap + transfer => BLOCKED', () => {
+    const engine = new DeterministicPolicyEngine();
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Swap 100 USDC -> ETH';
+    evidence.decode.functionName = 'transfer';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+      functionName: 'transfer',
+      signature: 'transfer(...)',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(false);
+    expect(ruleResult.verdictContribution).toBe('BLOCKED');
+    expect(ruleResult.reason).toMatch(/deceptive ui claim/i);
+    expect(ruleResult.reason).toMatch(/transfer/i);
+
+    const verdict = engine.evaluate(evidence);
+    expect(verdict.verdict).toBe('BLOCKED');
+  });
+
+  it('transfer + transfer => NOT BLOCKED', () => {
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Transfer 10 USDC';
+    evidence.decode.functionName = 'transfer';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+      functionName: 'transfer',
+      signature: 'transfer(...)',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(true);
+  });
+
+  it('swap + recognized swap => NOT BLOCKED', () => {
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Swap 100 USDC -> ETH';
+    evidence.decode.functionName = 'exactInputSingle';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45',
+      functionName: 'exactInputSingle',
+      signature: 'exactInputSingle(...)',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(true);
+  });
+
+  it('custom/unknown declared action + unknown decoded action => NOT BLOCKED by RULE_04', () => {
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Execute custom contract interaction';
+    evidence.decode.status = 'UNKNOWN_CALLDATA';
+    evidence.decode.functionName = null;
+    evidence.decode.signature = '0x12345678';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0x1111111111111111111111111111111111111111',
+      functionName: 'unknown_0x12345678',
+      signature: '0x12345678',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(true);
+  });
+
+  it('claim rewards + transferFrom => NOT BLOCKED by RULE_04', () => {
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'claim rewards';
+    evidence.decode.functionName = 'transferFrom';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+      functionName: 'transferFrom',
+      signature: 'transferFrom(...)',
+      args: {},
+      isDangerous: false,
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(true);
+  });
+
+  it('multicall containing approve while declared swap => BLOCKED if existing callTree supports this deterministically', () => {
+    const evidence = createMockEvidence();
+    evidence.application.declaredAction = 'Swap 100 USDC -> ETH';
+    evidence.decode.status = 'MULTICALL_DECODED';
+    evidence.decode.functionName = 'multicall';
+    evidence.decode.callTree = [{
+      index: 0,
+      depth: 0,
+      target: '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45',
+      functionName: 'multicall',
+      signature: 'multicall(2 calls)',
+      args: {},
+      isDangerous: false,
+      children: [
+        {
+          index: 0,
+          depth: 1,
+          target: '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45',
+          functionName: 'exactInputSingle',
+          signature: 'exactInputSingle(...)',
+          args: {},
+          isDangerous: false,
+        },
+        {
+          index: 1,
+          depth: 1,
+          target: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          functionName: 'approve',
+          signature: 'approve(...)',
+          args: {},
+          isDangerous: false,
+        },
+      ],
+    }];
+
+    const ruleResult = getRule04().evaluate(evidence, {});
+    expect(ruleResult.passed).toBe(false);
+    expect(ruleResult.verdictContribution).toBe('BLOCKED');
+    expect(ruleResult.reason).toMatch(/deceptive ui claim/i);
+    expect(ruleResult.reason).toMatch(/approve/i);
+  });
+});
+
