@@ -28,7 +28,12 @@ export const MULTICALL_ABIS = parseAbi([
 
 export function decodeMulticallIfPresent(
   target: `0x${string}`,
-  data: `0x${string}`
+  data: `0x${string}`,
+  options?: {
+    getDecimals?: (tokenAddress: string) => number | undefined;
+    highValueThresholdTokens?: bigint;
+    rawFallbackThreshold?: bigint;
+  }
 ): DecodeEvidence | null {
   const selector = data.slice(0, 10).toLowerCase();
 
@@ -86,7 +91,7 @@ export function decodeMulticallIfPresent(
 
     for (let i = 0; i < callsToUnpack.length; i++) {
       const sub = callsToUnpack[i];
-      const subEvidence = decodeTransactionCalldata(sub.target, sub.callData);
+      const subEvidence = decodeTransactionCalldata(sub.target, sub.callData, options);
 
       if (subEvidence.status === 'UNKNOWN_CALLDATA') {
         hasUnrecognizedSubcall = true;

@@ -175,3 +175,29 @@ export class ERC7730v2Adapter implements IntentProvider {
     };
   }
 }
+
+/**
+ * Mock live ERC-7730 descriptor provider for testing and verification against live-grade evidence.
+ * Honestly emits LIVE_REGISTRY provenance without making actual network calls.
+ */
+export class MockLiveERC7730Adapter extends ERC7730v2Adapter {
+  constructor() {
+    super(true);
+  }
+
+  async resolveIntent(
+    targetAddress: `0x${string}`,
+    chainId: number,
+    calldata: `0x${string}`,
+    decodeEvidence: DecodeEvidence
+  ): Promise<IntentEvidence> {
+    const res = await super.resolveIntent(targetAddress, chainId, calldata, decodeEvidence);
+    if (res.status === 'DESCRIPTOR_FOUND') {
+      return {
+        ...res,
+        provenance: 'LIVE_REGISTRY',
+      };
+    }
+    return res;
+  }
+}

@@ -73,9 +73,43 @@ export class DeterministicPolicyEngine {
       };
     }
 
+    // Demo Mode: produces explicitly labeled DEMO_VERIFIED state
+    if (this.options.provenanceMode === 'DEMO') {
+      const isFixtureBacked =
+        partialEvidence.contract.provenance === 'LOCAL_FIXTURE' ||
+        partialEvidence.intent.provenance === 'LOCAL_FIXTURE' ||
+        partialEvidence.simulation.provenance === 'LOCAL_FIXTURE';
+
+      if (isFixtureBacked) {
+        return {
+          verdict: 'DEMO_VERIFIED',
+          primaryReason: 'All mandatory checks passed using local demo fixtures (DEMO ONLY — not live security verification)',
+          rulesEvaluated,
+          blockedReasons: [],
+          warnings: [],
+        };
+      }
+    }
+
+    // Production Mode defense-in-depth: LOCAL_FIXTURE must never reach security-grade VERIFIED
+    const hasFixture =
+      partialEvidence.contract.provenance === 'LOCAL_FIXTURE' ||
+      partialEvidence.intent.provenance === 'LOCAL_FIXTURE' ||
+      partialEvidence.simulation.provenance === 'LOCAL_FIXTURE';
+
+    if (hasFixture && this.options.provenanceMode !== 'DEMO') {
+      return {
+        verdict: 'WARNING',
+        primaryReason: 'Degraded evidence: local fixture evidence cannot establish production security-grade VERIFIED',
+        rulesEvaluated,
+        blockedReasons: [],
+        warnings: ['Local fixture evidence cannot establish production security-grade VERIFIED'],
+      };
+    }
+
     return {
       verdict: 'VERIFIED',
-      primaryReason: 'All mandatory checks passed and transaction-request binding verified',
+      primaryReason: 'All mandatory checks passed and transaction-request binding verified with live evidence',
       rulesEvaluated,
       blockedReasons: [],
       warnings: [],

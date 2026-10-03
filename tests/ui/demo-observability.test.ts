@@ -56,7 +56,7 @@ describe('Demo UX & Execution Observability Tests', () => {
     expect(requestSpy).toHaveBeenCalledTimes(1);
     expect(runner.state.status).toBe('COMPLETED');
     expect(runner.state.result).toBe(result);
-    expect(runner.state.result?.verdict).toBe('VERIFIED');
+    expect(runner.state.result?.verdict).toBe('DEMO_VERIFIED');
     expect(runner.state.executionCount).toBe(1);
     expect(runner.state.lastExecutionTimestamp).toBeTruthy();
     // Real browser runtime timestamp format HH:MM:SS.mmm

@@ -25,11 +25,11 @@ npx tsc --noEmit
 ```
 *Expected Result:* Zero errors, exits cleanly.
 
-### Step 2: Automated Test Suite (86 Passing Tests)
+### Step 2: Automated Test Suite (197 Passing Tests)
 ```bash
 npm test
 ```
-*Expected Result:* All 86 tests across 7 test suites pass completely.
+*Expected Result:* All 197 tests across 7 test suites pass completely.
 
 ### Step 3: Production Build
 ```bash
@@ -71,7 +71,7 @@ Click the primary execution button. ActionProof will:
 3. Compute the canonical commitment hash.
 4. Execute the evidence pipeline (ABI decoding, multicall unrolling, simulation).
 5. Run the deterministic policy rules and issue a verdict.
-6. Verify the pre-forward barrier.
+6. Verify the pre-forward barrier (canonical payload derivation and commitment check).
 7. Either forward to the mock wallet or halt execution.
 
 #### 4. Observe Execution Telemetry
@@ -79,7 +79,7 @@ The UI immediately updates with:
 * **Status Badge:** `COMPLETED`
 * **Execution Counter:** e.g., `Execution #1`
 * **Live Timestamp:** Real-time runtime timestamp (e.g., `15:04:32.418`)
-* **Policy Verdict:** `VERIFIED`, `BLOCKED`, `COMMITMENT_MISMATCH`, or `UNSUPPORTED`.
+* **Policy Verdict:** `VERIFIED`, `WARNING`, `BLOCKED`, `UNSUPPORTED`, or `DEMO_VERIFIED` (Scenario 1 yields `DEMO_VERIFIED` indicating local fixture provenance).
 * **Mock Wallet Call Counter:**
   * For Scenario 1: Wallet receives **1** call.
   * For Scenarios 2–5: Wallet receives **0** calls.

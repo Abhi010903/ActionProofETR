@@ -13,10 +13,12 @@
  */
 
 import type { CanonicalTransactionRequest } from '../canonical/types.js';
+import type { StructuredIntent } from '../intent/structured.js';
 
 export interface ApplicationEvidence {
   status: 'AVAILABLE' | 'ABSENT';
   declaredAction: string;
+  structuredIntent?: StructuredIntent | null;
   source: 'DAPP_UI' | 'TEST_FIXTURE' | 'NONE';
   isUntrustedClaim: true;
 }
@@ -48,7 +50,11 @@ export interface CallTreeNode {
   children?: CallTreeNode[];
 }
 
-export type ApprovalClassification = 'EXACT_UNLIMITED' | 'HIGH_VALUE_APPROVAL' | 'STANDARD';
+export type ApprovalClassification =
+  | 'EXACT_UNLIMITED'
+  | 'HIGH_VALUE_APPROVAL'
+  | 'STANDARD'
+  | 'DEGRADED_UNVERIFIED';
 
 export interface ApprovalDetail {
   token: `0x${string}`;
@@ -57,6 +63,10 @@ export interface ApprovalDetail {
   classification: ApprovalClassification;
   isExactUnlimited: boolean;
   isHighValue: boolean;
+  decimals?: number | null;
+  normalizedAmount?: string | null;
+  decimalsAvailable?: boolean;
+  degradedReason?: string;
 }
 
 export interface DecodeEvidence {
@@ -81,6 +91,7 @@ export interface ContractEvidence {
   contractName: string | null;
   compiler: string | null;
   disclaimer: string;
+  decimals?: number | null;
 }
 
 export interface DescriptorCrossValidation {
@@ -131,8 +142,10 @@ export interface PolicyRuleEvaluation {
   reason?: string;
 }
 
+export type PolicyVerdict = 'VERIFIED' | 'WARNING' | 'BLOCKED' | 'UNSUPPORTED' | 'DEMO_VERIFIED';
+
 export interface PolicyEvidence {
-  verdict: 'VERIFIED' | 'WARNING' | 'BLOCKED' | 'UNSUPPORTED';
+  verdict: PolicyVerdict;
   primaryReason: string;
   rulesEvaluated: PolicyRuleEvaluation[];
   blockedReasons: string[];

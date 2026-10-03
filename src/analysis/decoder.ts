@@ -19,6 +19,7 @@ import type {
   CallTreeNode,
 } from '../evidence/types.js';
 import { decodeMulticallIfPresent } from './multicall.js';
+import { getTrustedTokenDecimals } from './contract.js';
 
 export const KNOWN_ERC20_ABI = parseAbi([
   'function transfer(address to, uint256 amount) returns (bool)',
@@ -31,35 +32,148 @@ export const KNOWN_SWAP_ABI = parseAbi([
   'function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256[] amounts)',
 ]);
 
+/**
+ * ============================================================================
+ * ACTIONPROOF APPROVAL CLASSIFICATION THRESHOLDS & EVIDENCE DISTINCTIONS
+ * ============================================================================
+ *
+ * 1. FACT: TOKEN DECIMALS EVIDENCE
+ *    Token decimals represent an on-chain / registry fact regarding the token contract's
+ *    underlying ERC-20 decimal representation. Decimals must only be sourced from
+ *    explicitly trusted evidence sources (e.g. verified contract fixtures). Decimals
+ *    MUST NEVER be inferred from token symbol, name, UI text, or application intent.
+ *
+ * 2. DESIGN DECISION / POLICY THRESHOLD:
+ *    ActionProof defines a normalized threshold of 1,000,000 (10^6) whole tokens
+ *    for classifying an approval as HIGH_VALUE_APPROVAL.
+ *    NOTE: This is NOT a universal cryptographic, mathematical, or financial truth.
+ *    No universal threshold exists for token approvals; a threshold is an explicit
+ *    deterministic policy choice configured to flag unusually large allowances
+ *    relative to standard retail interactions.
+ *
+ * 3. UNVERIFIED: UNAVAILABLE TOKEN METADATA
+ *    When token decimals are unavailable or untrusted, ActionProof REFUSES to perform
+ *    silent normalization (e.g. assuming 18 decimals). Instead, it classifies the
+ *    approval using a conservative raw base-unit fallback threshold (10^30) or marks
+ *    it as DEGRADED_UNVERIFIED to ensure fail-closed policy evaluation.
+ * ============================================================================
+ */
 export const UINT256_MAX = (1n << 256n) - 1n;
-export const DEFAULT_HIGH_VALUE_THRESHOLD = 10n ** 30n;
 
-export function classifyApproval(
-  amount: bigint,
-  highValueThreshold: bigint = DEFAULT_HIGH_VALUE_THRESHOLD
+// DESIGN DECISION / POLICY THRESHOLD: 1,000,000 normalized whole tokens
+export const DESIGN_DECISION_HIGH_VALUE_THRESHOLD_TOKENS = 1_000_000n;
+
+// UNVERIFIED: Conservative raw base-unit threshold when decimals are unavailable
+export const FALLBACK_RAW_HIGH_VALUE_THRESHOLD = 10n ** 30n;
+export const DEFAULT_HIGH_VALUE_THRESHOLD = FALLBACK_RAW_HIGH_VALUE_THRESHOLD;
+
+export function normalizeTokenAmount(
+  rawAmount: bigint,
+  decimals: number
 ): {
+  normalizedWhole: bigint;
+  formattedString: string;
+} {
+  if (decimals < 0 || decimals > 255) {
+    throw new Error(`Invalid token decimals: ${decimals}`);
+  }
+  const divisor = 10n ** BigInt(decimals);
+  const quotient = rawAmount / divisor;
+  const remainder = rawAmount % divisor;
+
+  if (remainder === 0n) {
+    return {
+      normalizedWhole: quotient,
+      formattedString: quotient.toString(),
+    };
+  }
+
+  const remainderStr = remainder.toString().padStart(decimals, '0').replace(/0+$/, '');
+  return {
+    normalizedWhole: quotient,
+    formattedString: `${quotient.toString()}.${remainderStr}`,
+  };
+}
+
+export interface ApprovalClassificationResult {
   classification: ApprovalClassification;
   isExactUnlimited: boolean;
   isHighValue: boolean;
-} {
+  decimals: number | null;
+  normalizedAmount: string | null;
+  decimalsAvailable: boolean;
+  degradedReason?: string;
+}
+
+export function classifyApproval(
+  amount: bigint,
+  decimalsOrThreshold?: number | bigint | null,
+  highValueTokenThreshold: bigint = DESIGN_DECISION_HIGH_VALUE_THRESHOLD_TOKENS,
+  rawFallbackThreshold: bigint = FALLBACK_RAW_HIGH_VALUE_THRESHOLD
+): ApprovalClassificationResult {
+  // Distinguish whether 2nd argument is legacy raw threshold (bigint) or token decimals (number)
+  let decimals: number | null = null;
+  let effectiveRawFallback = rawFallbackThreshold;
+
+  if (typeof decimalsOrThreshold === 'bigint') {
+    effectiveRawFallback = decimalsOrThreshold;
+  } else if (typeof decimalsOrThreshold === 'number') {
+    decimals = decimalsOrThreshold;
+  }
+
+  // 1. EXACT_UNLIMITED invariant: uint256.max is always exact unlimited regardless of decimals
   if (amount === UINT256_MAX) {
+    let normalizedStr: string | null = null;
+    if (typeof decimals === 'number' && decimals >= 0 && decimals <= 255) {
+      normalizedStr = normalizeTokenAmount(amount, decimals).formattedString;
+    }
     return {
       classification: 'EXACT_UNLIMITED',
       isExactUnlimited: true,
       isHighValue: false,
+      decimals: typeof decimals === 'number' ? decimals : null,
+      normalizedAmount: normalizedStr,
+      decimalsAvailable: typeof decimals === 'number',
     };
   }
-  if (amount >= highValueThreshold) {
+
+  // 2. FACT: Known & trusted decimals -> normalize humanReadableAmount = rawAmount / 10^decimals
+  // and compare against DESIGN DECISION policy threshold.
+  if (typeof decimals === 'number' && decimals >= 0 && decimals <= 255) {
+    const normalized = normalizeTokenAmount(amount, decimals);
+    const isHighValue = normalized.normalizedWhole >= highValueTokenThreshold;
+    return {
+      classification: isHighValue ? 'HIGH_VALUE_APPROVAL' : 'STANDARD',
+      isExactUnlimited: false,
+      isHighValue,
+      decimals,
+      normalizedAmount: normalized.formattedString,
+      decimalsAvailable: true,
+    };
+  }
+
+  // 3. UNVERIFIED: Decimals unavailable or untrusted.
+  // DO NOT silently normalize. Conservative fallback on raw base units.
+  if (amount >= effectiveRawFallback) {
     return {
       classification: 'HIGH_VALUE_APPROVAL',
       isExactUnlimited: false,
       isHighValue: true,
+      decimals: null,
+      normalizedAmount: null,
+      decimalsAvailable: false,
+      degradedReason: `Token decimals unavailable; raw amount exceeds fallback threshold (${effectiveRawFallback.toString()})`,
     };
   }
+
   return {
     classification: 'STANDARD',
     isExactUnlimited: false,
     isHighValue: false,
+    decimals: null,
+    normalizedAmount: null,
+    decimalsAvailable: false,
+    degradedReason: 'Token decimals unavailable; evaluated using raw base-unit fallback threshold',
   };
 }
 
@@ -74,9 +188,16 @@ interface ExactInputSingleParams {
   sqrtPriceLimitX96: bigint;
 }
 
+export interface DecodeOptions {
+  getDecimals?: (tokenAddress: string) => number | undefined;
+  highValueThresholdTokens?: bigint;
+  rawFallbackThreshold?: bigint;
+}
+
 export function decodeTransactionCalldata(
   target: `0x${string}`,
-  data: `0x${string}`
+  data: `0x${string}`,
+  options?: DecodeOptions
 ): DecodeEvidence {
   if (!data || data === '0x') {
     return {
@@ -92,7 +213,7 @@ export function decodeTransactionCalldata(
   }
 
   // 1. Check if this is a supported Multicall wrapper
-  const multicallResult = decodeMulticallIfPresent(target, data);
+  const multicallResult = decodeMulticallIfPresent(target, data, options);
   if (multicallResult) {
     return multicallResult;
   }
@@ -114,7 +235,15 @@ export function decodeTransactionCalldata(
 
     if (decoded.functionName === 'approve') {
       const [spender, amount] = decoded.args as readonly [`0x${string}`, bigint];
-      const classification = classifyApproval(amount);
+      const decimals = options?.getDecimals
+        ? options.getDecimals(target)
+        : getTrustedTokenDecimals(target);
+      const classification = classifyApproval(
+        amount,
+        decimals,
+        options?.highValueThresholdTokens,
+        options?.rawFallbackThreshold
+      );
 
       if (classification.isExactUnlimited) {
         hasExactUnlimitedApproval = true;
@@ -123,7 +252,10 @@ export function decodeTransactionCalldata(
       } else if (classification.isHighValue) {
         hasHighValueApproval = true;
         isDangerous = true;
-        dangerReason = `High-value token approval (>= 10^30) requested for spender: ${spender}`;
+        const amtMsg = classification.normalizedAmount
+          ? `${classification.normalizedAmount} tokens`
+          : `raw >= ${options?.rawFallbackThreshold ?? FALLBACK_RAW_HIGH_VALUE_THRESHOLD}`;
+        dangerReason = `High-value token approval (${amtMsg}) requested for spender: ${spender}`;
       }
 
       detectedApprovals.push({
@@ -133,6 +265,10 @@ export function decodeTransactionCalldata(
         classification: classification.classification,
         isExactUnlimited: classification.isExactUnlimited,
         isHighValue: classification.isHighValue,
+        decimals: classification.decimals,
+        normalizedAmount: classification.normalizedAmount,
+        decimalsAvailable: classification.decimalsAvailable,
+        degradedReason: classification.degradedReason,
       });
 
       argsObj.spender = spender;

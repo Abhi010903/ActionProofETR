@@ -44,6 +44,11 @@ Decentralized applications cannot be trusted to provide honest ABI definitions f
   * **Uniswap V2 / V3:** `swapExactTokensForTokens`, `exactInputSingle`.
   * **Multicall3:** `aggregate3`, `aggregate`, `multicall`.
 * **Safe Parsing:** Parameter offsets and dynamic byte arrays (strings, bytes) are parsed defensively to prevent out-of-bounds slicing or buffer overflow exploits.
+* **Deterministic Approval Classification (H5):**
+  * `EXACT_UNLIMITED`: `amount === (2^256 - 1)` (`UINT256_MAX`) $\rightarrow$ classified as exact unlimited approval (`RULE_02A`).
+  * **Decimal-Aware Normalization:** When token decimals are known and trusted (from contract fixtures or registries), ActionProof normalizes the raw amount to whole tokens: $\text{amount}_{\text{normalized}} = \text{rawAmount} / 10^{\text{decimals}}$. An allowance $\ge 1,000,000$ whole tokens is classified as `HIGH_VALUE_APPROVAL` (`RULE_02B`).
+  * **Conservative Fallback:** When token decimals are unavailable or untrusted, ActionProof refuses to assume 18 decimals; it falls back to evaluating against the raw base-unit threshold of $10^{30}$.
+  * *Policy Choice Note:* The 1,000,000 whole-token threshold is ActionProof's deterministic policy and design choice, not a universal security truth.
 
 ### 2.2. Recursive Multicall Inspector (`src/analysis/multicall.ts`)
 Complex DeFi protocols use multicall contracts to bundle actions. Malicious payloads frequently hide high-risk actions (e.g. infinite token approvals) inside seemingly benign swap bundles:
@@ -55,7 +60,9 @@ Complex DeFi protocols use multicall contracts to bundle actions. Malicious payl
 ### 2.3. Contract Identity & Sourcify Adapter (`src/analysis/contract.ts`)
 Validates that the target contract address matches authenticated source code:
 * **Registry Status:** Queries contract verification status (`FULL_MATCH`, `PARTIAL_MATCH`, `UNVERIFIED`).
-* **Provenance Tracking:** In the current MVP demo, verification results are provided via a deterministic `LOCAL_FIXTURE` adapter, avoiding flaky external network calls while maintaining identical API contracts for production `LIVE_REGISTRY` providers.
+* **Provenance Tracking (M4):**
+  * In `PRODUCTION` mode, `LOCAL_FIXTURE` evidence cannot establish a security-grade `VERIFIED` verdict and degrades to `WARNING`. Production `VERIFIED` requires live external evidence (e.g. via `createLiveEvidencePipeline()`).
+  * In `DEMO` mode, local deterministic fixtures produce `DEMO_VERIFIED`, which is visibly distinct from production `VERIFIED`.
 
 ### 2.4. Clear Signing & ERC-7730 Adapter (`src/intent/erc7730.ts`)
 ERC-7730 establishes a standard format for mapping smart contract calldata to structured, human-readable clear signing displays:
@@ -67,8 +74,8 @@ ERC-7730 establishes a standard format for mapping smart contract calldata to st
 Predicts transaction consequences before authorization:
 * **State Diff Analysis:** Calculates predicted token balance deltas (e.g. `-100 USDC`, `+0.038 ETH`).
 * **Revert Detection:** Identifies transactions that would fail on-chain.
-* **Explicit Provenance Annotations:** ActionProof never pretends that fixture simulations are live network calls. Every simulation result includes an explicit `provenance` tag:
+* **Explicit Provenance Annotations (M4):** ActionProof never pretends that fixture simulations are live network calls. Every simulation result includes an explicit `provenance` tag:
   * `LIVE_BACKEND`: Executed against an active fork or JSON-RPC node via `eth_call` / debug tracing.
-  * `LOCAL_FIXTURE`: Executed against deterministic local simulation fixtures for hermetic testing and demonstration.
+  * `LOCAL_FIXTURE`: Executed against deterministic local simulation fixtures for hermetic testing and demonstration (produces `DEMO_VERIFIED` in demo mode, degrades to `WARNING` in production mode).
   * `UNAVAILABLE`: Simulation provider not configured or network unreachable (emits policy `WARNING`).
 * **TOCTOU Advisory:** ActionProof explicitly documents that simulations are point-in-time predictions; between simulation time and mining time, on-chain state can change (front-running, sandwich attacks).

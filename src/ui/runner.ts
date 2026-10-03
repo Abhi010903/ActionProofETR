@@ -81,11 +81,14 @@ export class DemoRunner {
 
     const pipeline = new EvidencePipeline({
       simulationAdapter: new LocalFixtureSimulationAdapter(),
+      provenanceMode: 'DEMO',
+      policyEngineOptions: { provenanceMode: 'DEMO' },
     });
 
     const proxy = new ActionProofProviderProxy(this._wallet, {
       declaredAction: this._state.selectedScenario.declaredAction,
       evidencePipeline: pipeline,
+      provenanceMode: 'DEMO',
       barrier: async (liveTx) => {
         if (this._state.selectedScenario.mutationHook) {
           this._state.selectedScenario.mutationHook(liveTx);

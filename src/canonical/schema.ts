@@ -44,12 +44,23 @@ export function validateRequestShape(tx: unknown): Record<string, unknown> {
     throw new SchemaValidationError('INVALID_TX', 'Transaction request must be a non-null object');
   }
 
+  const proto = Object.getPrototypeOf(tx);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new SchemaValidationError(
+      'INVALID_PROTOTYPE',
+      'Transaction request object must inherit from Object.prototype or null'
+    );
+  }
+
   const record = tx as Record<string | symbol, unknown>;
   const keys = Reflect.ownKeys(record);
 
   for (const key of keys) {
     if (typeof key === 'symbol') {
       throw new SchemaValidationError(`UNKNOWN_FIELD:${key.toString()}`, `Unknown symbol transaction field: ${key.toString()}`);
+    }
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw new SchemaValidationError('PROTOTYPE_POLLUTION', `Payload contains forbidden prototype property: ${key}`);
     }
     if (UNSUPPORTED_KEYS.has(key)) {
       throw new SchemaValidationError(`UNSUPPORTED_FIELD:${key}`, `Unsupported transaction field: ${key}`);
@@ -59,11 +70,11 @@ export function validateRequestShape(tx: unknown): Record<string, unknown> {
     }
   }
 
-  if (record.to === undefined || record.to === null) {
+  if (!Object.prototype.hasOwnProperty.call(record, 'to') || record.to === undefined || record.to === null) {
     throw new SchemaValidationError('UNSUPPORTED_CONTRACT_CREATION', 'Contract creation transactions are unsupported in MVP');
   }
 
-  if (record.from === undefined || record.from === null) {
+  if (!Object.prototype.hasOwnProperty.call(record, 'from') || record.from === undefined || record.from === null) {
     throw new SchemaValidationError('MISSING_FROM', 'Transaction "from" address is required');
   }
 

@@ -15,9 +15,12 @@ flowchart LR
         
         Eval["Evidence Collection &<br/>Policy Decision (VERIFIED)"]
 
-        Barrier{"Pre-Forward Recheck<br/>Re-Canonicalize Outgoing Snapshot"}
+        Barrier{"Pre-Forward Barrier<br/>Recheck & Serialize Canonical"}
         Hash2["Forward Commitment<br/>Keccak-256 (C_fwd)"]
         Check{"C_fwd == C_verified ?"}
+        Derive["Serialize Canonical<br/>serializeCanonicalToRpcPayload(canonical)"]
+        Hash3["Dispatched Commitment<br/>Keccak-256 (C_dispatch)"]
+        Check2{"C_dispatch == C_verified ?"}
     end
 
     subgraph Wallet Interface
@@ -27,10 +30,14 @@ flowchart LR
     Req -->|"Intercepted"| Snap
     Snap --> Canon1 --> Hash1
     Hash1 --> Eval --> Barrier
-    Barrier -->|"Payload about to dispatch"| Hash2
+    Barrier -->|"Outgoing snapshot"| Hash2
     Hash1 & Hash2 --> Check
-    Check -->|"YES (Match)"| Forward
-    Check -->|"NO (Mismatch)"| Halt["HALT: COMMITMENT_MISMATCH<br/>(Wallet NEVER Called)"]
+    Check -->|"MATCH"| Derive
+    Derive --> Hash3
+    Hash1 & Hash3 --> Check2
+    Check2 -->|"MATCH"| Forward
+    Check -.->|"MISMATCH"| Halt["HALT: COMMITMENT_MISMATCH<br/>(Wallet NEVER Called)"]
+    Check2 -.->|"MISMATCH"| Halt
 ```
 
 ---
@@ -80,20 +87,21 @@ payload.to = attackerAddress;
 ```
 **ActionProof Defense:**  
 1. ActionProof discards the original userland object reference and performs all verification on its frozen internal snapshot.
-2. The payload passed to the underlying wallet is derived from a freshly created immutable forward snapshot immediately prior to pre-forward recheck.
-3. If an attacker manages to tamper with the outgoing parameter object, the pre-forward recheck in `ActionProofProviderProxy.executeSendTransaction()` catches the hash mismatch and halts execution.
+2. The dispatched RPC payload is derived directly from the verified canonical representation using:
+   `serializeCanonicalToRpcPayload(canonical)`
+3. The system then re-verifies the dispatched payload commitment against the verified commitment before calling `wallet.request()`. If any divergence is detected, execution aborts with `COMMITMENT_MISMATCH` or `DISPATCH_COMMITMENT_MISMATCH`.
 
 ### 3.3. Nested Object Mutation & Prototype Pollution
 Objects containing nested structures (such as `accessList` arrays containing address and storage key tuples) are recursively cloned and frozen. Prototype chains are sanitized, preventing prototype pollution attacks on `Object.prototype`.
 
 ---
 
-## 4. Pre-Forward Commitment Recheck Implementation
+## 4. Pre-Forward Commitment Recheck & Canonical Serialization
 
-The pre-forward commitment recheck is executed in-line within `ActionProofProviderProxy.executeSendTransaction()` in [`src/provider/proxy.ts`](file:///C:/Coding/Projects/Crypto_Fair/src/provider/proxy.ts):
+The pre-forward commitment recheck and canonical RPC serialization are executed in-line within `ActionProofProviderProxy.executeSendTransaction()` in [`src/provider/proxy.ts`](file:///C:/Coding/Projects/Crypto_Fair/src/provider/proxy.ts):
 
 ```typescript
-// 4. Create an immutable verified forwarding snapshot immediately prior to pre-forward recheck.
+// 1. Create an immutable verified forwarding snapshot immediately prior to pre-forward recheck.
 let forwardPayload: Record<string, unknown>;
 try {
   forwardPayload = createImmutableSnapshot(liveRequest) as Record<string, unknown>;
@@ -107,10 +115,10 @@ try {
   };
 }
 
-// 5. Pre-forward recheck: immediately recompute commitment on the exact snapshot about to be forwarded
-const forwardCommitment = computeCommitment(forwardPayload, this.activeChainId);
+// 2. Pre-forward recheck: immediately recompute commitment on the outgoing snapshot
+const forwardCommitment = computeCommitment(forwardPayload, activeWalletChainId);
 
-// Strict commitment equality invariant
+// 3. Strict commitment equality invariant
 if (forwardCommitment.hash !== verifiedCommitment.hash) {
   evidence.binding.status = 'MISMATCH';
   evidence.binding.forwardCommitment = forwardCommitment.hash;
@@ -127,7 +135,27 @@ if (forwardCommitment.hash !== verifiedCommitment.hash) {
     blockedBeforeForwarding: true,
   };
 }
+
+// 4. Derive dispatched RPC payload directly from verified canonical representation (M2 & M3)
+const forwardRpcPayload = serializeCanonicalToRpcPayload(verifiedCommitment.canonical);
+
+// 5. Verify dispatched payload commitment matches verified commitment before calling wallet
+const dispatchedCommitment = computeCommitment(forwardRpcPayload, activeWalletChainId);
+if (dispatchedCommitment.hash !== verifiedCommitment.hash) {
+  evidence.binding.status = 'MISMATCH';
+  evidence.policy.verdict = 'BLOCKED';
+  return {
+    verdict: 'BLOCKED',
+    reason: 'DISPATCH_COMMITMENT_MISMATCH',
+    // ...
+  };
 }
+
+// 6. Forward ONLY the verified canonical payload to the underlying wallet
+const rawTxHash = await this.wallet.request({
+  method: 'eth_sendTransaction',
+  params: [forwardRpcPayload],
+});
 ```
 
-This ensures that under no circumstances can an altered request be transmitted to the underlying wallet.
+This ensures that under no circumstances can an altered or non-canonical request be transmitted to the underlying wallet.

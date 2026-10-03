@@ -45,13 +45,15 @@ flowchart TD
 
 | Threat ID | Threat Name | Adversary Technique | ActionProof Defense Mechanism | Severity | Outcome |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **THREAT-01** | **UI Deception / Intent Contradiction** | Compromised frontend renders "Swap 100 USDC -> ETH" while calldata executes `approve(attacker, ...)` or `transfer(...)`. | Evaluates declared intent categories (`SWAP`, `TRANSFER`, `SEND`, `PAYMENT`, `APPROVAL`, `CLAIM`) against decoded action categories (`APPROVE`, `TRANSFER`, `TRANSFER_FROM`, `SWAP`, `UNKNOWN`) via deterministic `RULE_04`. Contradictions fail closed. | Critical | **BLOCKED (Deceptive UI Claim)** |
-| **THREAT-02** | **Stealth Multicall Approval** | Attacker batches a normal swap with `token.approve(attacker, MAX_UINT256)` inside `Multicall3.aggregate3`. | Multicall engine recursively unpacks nested call array. Policy engine (`RULE_02A`, `RULE_03`, `RULE_04`) detects unannounced approval and dangerous subcalls. | Critical | **BLOCKED** |
-| **THREAT-03** | **Post-Verification Mutation (TOCTOU)** | Hostile script modifies `tx.to` in the JavaScript heap after policy check passes, before wallet receives request. | In-line pre-forward recheck in `executeSendTransaction()` takes immutable snapshot, re-canonicalizes, and verifies $\mathcal{C}_{\text{fwd}} \equiv \mathcal{C}_{\text{verified}}$ via Keccak-256. | Critical | **COMMITMENT_ MISMATCH (BLOCKED)** |
+| **THREAT-01** | **UI Deception / Intent Contradiction** | Compromised frontend renders "Swap 100 USDC -> ETH" while calldata executes `approve(attacker, ...)` or `transfer(...)`. | Evaluates declared intent categories (`SWAP`, `TRANSFER`, `SEND`, `PAYMENT`, `APPROVAL`, `CLAIM`) against decoded action categories (`APPROVE`, `TRANSFER`, `TRANSFER_FROM`, `SWAP`, `UNKNOWN`) via deterministic `RULE_04`. Structured intent enforces default-deny (H1), and `RULE_09` enforces explicit recipient/spender binding (H2). Contradictions fail closed. | Critical | **BLOCKED (Deceptive UI Claim)** |
+| **THREAT-02** | **Stealth Multicall Approval** | Attacker batches a normal swap with `token.approve(attacker, MAX_UINT256)` inside `Multicall3.aggregate3`. | Multicall engine recursively unpacks nested call array. Policy engine (`RULE_02A`, `RULE_03`, `RULE_04`, `RULE_09`) detects unannounced approval, dangerous subcalls, and unbound spenders. | Critical | **BLOCKED** |
+| **THREAT-03** | **Post-Verification Mutation (TOCTOU)** | Hostile script modifies `tx.to` in the JavaScript heap after policy check passes, before wallet receives request. | In-line pre-forward recheck in `executeSendTransaction()` takes immutable snapshot and re-verifies commitment. Dispatched payload is derived strictly from the verified canonical representation via `serializeCanonicalToRpcPayload(canonical)` and re-verified before `wallet.request()`. | Critical | **COMMITMENT_ MISMATCH (BLOCKED)** |
 | **THREAT-04** | **Getter / Proxy Trap Manipulation** | Attacker passes object with getter returning benign value on read #1 (scanner) and malicious value on read #2 (wallet). | `createImmutableSnapshot()` invokes getters once during single-pass extraction, deep-clones values into a null-prototype dictionary, and recursively freezes. | High | **BLOCKED / DEFUSED** |
 | **THREAT-05** | **Unknown / Opaque Calldata** | Attacker submits unverified custom contract payload hoping scanner fails open or issues passive warning. | Strict **Fail-Closed** policy via `RULE_08`: unknown function selectors cannot produce `VERIFIED`. | High | **BLOCKED (UNKNOWN_CALLDATA)** |
 | **THREAT-06** | **Unsupported Protocol Bypass (EIP-7702)** | Attacker submits Type-4 transaction with `authorizationList` to delegate EOA code to drainer contract. | Canonical validator checks schema whitelist (`SUPPORTED_KEYS`). Any presence of `authorizationList` or blobs triggers fail-closed `UNSUPPORTED`. | Critical | **UNSUPPORTED (BLOCKED)** |
 | **THREAT-07** | **Direct Provider Bypass** | Hostile script bypasses `window.ethereum` and sends raw JSON-RPC directly to Infura/Alchemy or local node. | Outside EIP-1193 proxy scope. ActionProof protects the provider path it owns. | N/A | **OUT OF SCOPE** |
+| **THREAT-08** | **ERC-4337 UserOperation Bypass (SEC-AA-01)** | Hostile script attempts to dispatch `eth_sendUserOperation` or `eth_estimateUserOperationGas` to circumvent `eth_sendTransaction` verification. | `ActionProofProviderProxy` intercepts ERC-4337 methods and immediately fails closed with `UNSUPPORTED_DANGEROUS_METHOD`. | High | **UNSUPPORTED (BLOCKED)** |
+| **THREAT-09** | **Excessive / Decimal-Obfuscated Approval (H5)** | DApp requests excessive approval (e.g. $10^{29}$ base units) obscured by non-standard token decimals. | Independent decoder normalizes approvals using trusted contract decimals ($10^6$ whole-token policy threshold) or falls back to a $10^{30}$ raw threshold (`RULE_02B`). | High | **BLOCKED / WARNING** |
 
 ---
 
@@ -74,7 +76,7 @@ ActionProof rejects UI deception without relying on probabilistic NLP models or 
 
 ---
 
-## 3. Defense-in-Depth Design
+## 4. Defense-in-Depth Design
 
 ActionProof implements defense-in-depth through orthogonal validation layers:
 1. **Structural Validation:** Rejects any payload violating `actionproof.request.v1` schema.

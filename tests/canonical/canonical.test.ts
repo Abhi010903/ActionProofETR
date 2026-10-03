@@ -4,6 +4,7 @@ import {
   computeCommitment,
   SchemaValidationError,
 } from '../../src/canonical/index.js';
+import { serializeCanonicalToRpcPayload } from '../../src/canonical/serializer.js';
 import { createImmutableSnapshot } from '../../src/provider/snapshot.js';
 
 const USER = '0x04f8996da763b7a969b1028ee3007569eaf3a635' as const;
@@ -257,5 +258,137 @@ describe('Canonical Transaction Request & Commitment', () => {
     expect(Object.isFrozen(snapshot.accessList)).toBe(true);
     expect(Object.isFrozen(snapshot.accessList[0])).toBe(true);
     expect(Object.isFrozen(snapshot.accessList[0].storageKeys)).toBe(true);
+  });
+
+  describe('M1: Prototype Pollution & Prototype Hardening', () => {
+    it('M1-1: Object with __proto__ own property is rejected by schema validator', () => {
+      const maliciousTx = JSON.parse('{"__proto__":{"polluted":true},"from":"0x04f8996da763b7a969b1028ee3007569eaf3a635","to":"0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45","data":"0x"}');
+      expect(() => computeCommitment(maliciousTx, 1)).toThrowError(SchemaValidationError);
+      try {
+        computeCommitment(maliciousTx, 1);
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(SchemaValidationError);
+        expect((err as SchemaValidationError).code).toBe('PROTOTYPE_POLLUTION');
+      }
+    });
+
+    it('M1-2: Object with custom prototype is rejected by schema validator', () => {
+      class CustomRequest {
+        from = USER;
+        to = ROUTER;
+        data = DATA;
+        chainId = 1;
+      }
+      const customTx = new CustomRequest();
+      expect(() => computeCommitment(customTx, 1)).toThrowError(SchemaValidationError);
+      try {
+        computeCommitment(customTx, 1);
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(SchemaValidationError);
+        expect((err as SchemaValidationError).code).toBe('INVALID_PROTOTYPE');
+      }
+    });
+
+    it('M1-3: Object.create(null) with valid fields is accepted and canonicalized', () => {
+      const nullProtoTx: Record<string, unknown> = Object.create(null);
+      nullProtoTx.from = USER;
+      nullProtoTx.to = ROUTER;
+      nullProtoTx.value = '0x0';
+      nullProtoTx.data = DATA;
+      nullProtoTx.chainId = 1;
+
+      const commitment = computeCommitment(nullProtoTx, 1);
+      expect(commitment.canonical.from).toBe(USER);
+      expect(commitment.canonical.to).toBe(ROUTER);
+      expect(commitment.hash).toMatch(/^0x[0-9a-f]{64}$/);
+    });
+
+    it('M1-4: createImmutableSnapshot rejects prototype pollution attempts and isolates prototype chain', () => {
+      // 1. Rejects own __proto__
+      const maliciousOwnProto = JSON.parse('{"__proto__":{"polluted":true},"from":"0x123"}');
+      expect(() => createImmutableSnapshot(maliciousOwnProto)).toThrowError(/PROTOTYPE_POLLUTION/);
+
+      // 2. Rejects custom prototype
+      const customProtoObj = Object.create({ malicious: true });
+      customProtoObj.from = USER;
+      expect(() => createImmutableSnapshot(customProtoObj)).toThrowError(/INVALID_PROTOTYPE/);
+
+      // 3. Cloned object has null prototype and cannot inherit from Object.prototype
+      const validTx = { from: USER, to: ROUTER, data: DATA, chainId: 1 };
+      const snap = createImmutableSnapshot(validTx);
+      expect(Object.getPrototypeOf(snap)).toBeNull();
+    });
+  });
+
+  describe('M2: Canonical RPC Payload Serialization', () => {
+    it('M2-1: serializeCanonicalToRpcPayload produces expected fields', () => {
+      const canonical = canonicalize({
+        from: USER,
+        to: ROUTER,
+        value: '0x10',
+        data: DATA,
+        chainId: 1,
+        type: '0x2',
+        nonce: '0x1',
+        gas: '0x5208',
+        maxFeePerGas: '0x3b9aca00',
+        maxPriorityFeePerGas: '0x3b9aca00',
+        accessList: [{ address: USER, storageKeys: ['0x0000000000000000000000000000000000000000000000000000000000000001'] }],
+      }, 1);
+
+      const rpcPayload = serializeCanonicalToRpcPayload(canonical);
+      expect(rpcPayload.from).toBe(USER);
+      expect(rpcPayload.to).toBe(ROUTER);
+      expect(rpcPayload.value).toBe('0x10');
+      expect(rpcPayload.data).toBe(DATA.toLowerCase());
+      expect(rpcPayload.chainId).toBe(1);
+      expect(rpcPayload.type).toBe('0x2');
+      expect(rpcPayload.nonce).toBe('0x1');
+      expect(rpcPayload.gas).toBe('0x5208');
+      expect(rpcPayload.maxFeePerGas).toBe('0x3b9aca00');
+      expect(rpcPayload.maxPriorityFeePerGas).toBe('0x3b9aca00');
+      expect(Array.isArray(rpcPayload.accessList)).toBe(true);
+    });
+
+    it('M2-2: All quantities are normalized 0x-hex strings and chainId is number', () => {
+      const canonical = canonicalize({
+        from: USER,
+        to: ROUTER,
+        value: 0,
+        chainId: 1,
+      }, 1);
+
+      const rpcPayload = serializeCanonicalToRpcPayload(canonical);
+      expect(rpcPayload.value).toBe('0x0');
+      expect(rpcPayload.chainId).toBe(1);
+      expect(typeof rpcPayload.chainId).toBe('number');
+    });
+
+    it('M2-3: Empty calldata is serialized as exactly 0x', () => {
+      const canonical = canonicalize({
+        from: USER,
+        to: ROUTER,
+        chainId: 1,
+      }, 1);
+
+      const rpcPayload = serializeCanonicalToRpcPayload(canonical);
+      expect(rpcPayload.data).toBe('0x');
+    });
+
+    it('M2-4: Mixed-case addresses are normalized to canonical lowercase', () => {
+      const mixedUser = '0x04F8996DA763B7A969B1028EE3007569EAF3A635';
+      const mixedRouter = '0x68B3465833FB72A70ECDF485E0E4C7BD8665FC45';
+      const canonical = canonicalize({
+        from: mixedUser,
+        to: mixedRouter,
+        chainId: 1,
+      }, 1);
+
+      const rpcPayload = serializeCanonicalToRpcPayload(canonical);
+      expect(rpcPayload.from).toBe(USER);
+      expect(rpcPayload.to).toBe(ROUTER);
+    });
   });
 });

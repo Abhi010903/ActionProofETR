@@ -135,3 +135,30 @@ export class LocalFixtureSimulationAdapter implements SimulationAdapter {
     };
   }
 }
+
+/**
+ * Mock live simulation adapter for testing and verification against live-grade evidence.
+ * Honestly emits LIVE_BACKEND provenance without making external network calls.
+ */
+export class MockLiveSimulationAdapter implements SimulationAdapter {
+  constructor(
+    private readonly blockNumber = 20780100,
+    private readonly baseFee = '15.5 Gwei'
+  ) {}
+
+  async simulate(canonicalTx: CanonicalTransactionRequest): Promise<SimulationEvidence> {
+    const fixtureAdapter = new LocalFixtureSimulationAdapter(this.blockNumber, this.baseFee);
+    const res = await fixtureAdapter.simulate(canonicalTx);
+    if (res.status === 'FIXTURE_SIMULATION') {
+      return {
+        ...res,
+        status: 'LIVE_SIMULATED',
+        provenance: 'LIVE_BACKEND',
+      };
+    }
+    return {
+      ...res,
+      provenance: 'LIVE_BACKEND',
+    };
+  }
+}

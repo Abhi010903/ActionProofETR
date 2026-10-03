@@ -34,12 +34,20 @@ export function createImmutableSnapshot<T>(obj: T): Readonly<T> {
       return Object.freeze(clonedArr);
     }
 
-    const clonedObj: Record<string | symbol, unknown> = {};
+    const proto = Object.getPrototypeOf(item);
+    if (proto !== Object.prototype && proto !== null) {
+      throw new Error('INVALID_PROTOTYPE: Transaction request object must inherit from Object.prototype or null');
+    }
+
+    const clonedObj: Record<string | symbol, unknown> = Object.create(null);
     seen.set(item, clonedObj);
 
     // Reflect.ownKeys captures string keys, non-enumerable keys, and symbol keys
     const keys = Reflect.ownKeys(item);
     for (const key of keys) {
+      if (typeof key === 'string' && (key === '__proto__' || key === 'constructor' || key === 'prototype')) {
+        throw new Error(`PROTOTYPE_POLLUTION: Forbidden prototype property: ${key}`);
+      }
       // Accessing item[key] invokes any getter into a concrete value once
       const val = (item as Record<string | symbol, unknown>)[key];
       clonedObj[key] = cloneAndFreeze(val, seen);

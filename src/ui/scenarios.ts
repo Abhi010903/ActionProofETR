@@ -70,7 +70,7 @@ export const DEMO_SCENARIOS: DemoScenario[] = [
         maxPriorityFeePerGas: '0x3b9aca00',
       };
     },
-    explanation: 'Captures request, takes immutable snapshot, canonicalizes under actionproof.request.v1, computes Commitment A, independently decodes swapExactInputSingle, cross-references Sourcify correspondence & ERC-7730 descriptor, evaluates simulation evidence (deterministic LOCAL_FIXTURE fixture — not live EVM execution), evaluates 8 deterministic policy rules, verifies Commitment B recheck matches Commitment A, and forwards verified snapshot to wallet. Status: VERIFIED — mandatory supported checks passed and Level-2 provider binding established.',
+    explanation: 'Captures request, takes immutable snapshot, canonicalizes under actionproof.request.v1, computes Commitment A, independently decodes swapExactInputSingle, cross-references Sourcify correspondence & ERC-7730 descriptor, evaluates simulation evidence (deterministic LOCAL_FIXTURE fixture — not live EVM execution), evaluates 9 deterministic policy rules (RULE_01 to RULE_08, including RULE_02A & RULE_02B), verifies Commitment B recheck matches Commitment A, and forwards verified snapshot to wallet. Status: VERIFIED — mandatory supported checks passed and Level-2 provider binding established.',
   },
 
   {
@@ -114,7 +114,7 @@ export const DEMO_SCENARIOS: DemoScenario[] = [
         type: '0x2',
       };
     },
-    explanation: 'Untrusted DApp UI asserts a harmless swap claim. ActionProof recursively unpacks the multicall batch and isolates subcall #2: approve(attacker, type(uint256).max). Deterministic policy triggers fatal violations (RULE_01_NO_UNLIMITED_APPROVAL and RULE_04_NO_STEALTH_APPROVAL). Request is BLOCKED before wallet forwarding. The wallet receives ZERO requests.',
+    explanation: 'Untrusted DApp UI asserts a harmless swap claim. ActionProof recursively unpacks the multicall batch and isolates subcall #2: approve(attacker, type(uint256).max). Deterministic policy triggers fatal violations (RULE_02A_NO_EXACT_UNLIMITED_APPROVALS and RULE_04_APPLICATION_INTENT_ALIGNMENT). Request is BLOCKED before wallet forwarding. The wallet receives ZERO requests.',
   },
   {
     id: 'attack_destination_mutation',

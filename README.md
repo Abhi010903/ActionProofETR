@@ -1,16 +1,16 @@
 # ActionProof — Pre-Signing Ethereum Security Gate
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-86%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-197%20passing-brightgreen.svg)]()
 [![Build](https://img.shields.io/badge/Build-Passing-success.svg)]()
 [![Security Level](https://img.shields.io/badge/Security-Level--2%20Provider%20Binding-purple.svg)]()
 [![Ecosystem](https://img.shields.io/badge/Ecosystem-Ethereum%20EIP--1193-orange.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> **Official Repository:** [https://github.com/Abhi010903/ActionProofETR](https://github.com/Abhi010903/ActionProofETR)  
-> **Ecosystem:** Ethereum  
-> **Specification Baseline:** Frozen v1.0.0 (`ActionProof_Final_Build_Spec_FINAL.zip`)  
-> **Security Level:** Level-2 Canonical Transaction-Request Binding  
+> **Official Repository:** [https://github.com/Abhi010903/ActionProofETR](https://github.com/Abhi010903/ActionProofETR)
+> **Ecosystem:** Ethereum
+> **Specification Baseline:** Frozen v1.0.0 (`ActionProof_Final_Build_Spec_FINAL.zip`)
+> **Security Level:** Level-2 Canonical Transaction-Request Binding
 
 ---
 
@@ -54,7 +54,7 @@
 
 Instead of passively warning users or relying on non-deterministic LLMs, ActionProof sits directly in the execution path between the DApp and the user's Web3 wallet. It intercepts `eth_sendTransaction` requests, freezes an immutable snapshot to prevent in-flight memory tampering, deterministically canonicalizes transaction fields under the `actionproof.request.v1` schema, generates a cryptographic Keccak-256 commitment, independently decodes calldata (including recursive multicalls), verifies contract identity and clear-signing descriptors, and evaluates a pure deterministic policy.
 
-Crucially, ActionProof enforces a **Level-2 Provider Request Binding Invariant**: immediately before calling the underlying wallet provider, a pre-forward commitment barrier re-canonicalizes the live outgoing payload and verifies that its cryptographic commitment is identical to the verified snapshot. If any field was mutated, or if the transaction cannot be safely understood, **ActionProof fails closed and halts execution before the wallet confirmation screen is ever prompted.**
+Crucially, ActionProof enforces a **Level-2 Provider Request Binding Invariant**: immediately before calling the underlying wallet provider, the pre-forward barrier verifies that the live outgoing payload commitment matches the verified snapshot commitment. Furthermore, the dispatched RPC payload is derived directly from the verified canonical representation using `serializeCanonicalToRpcPayload(canonical)` and re-verified against the commitment before calling `wallet.request()`. If any field was mutated, or if the transaction cannot be safely understood, **ActionProof fails closed and halts execution before the wallet confirmation screen is ever prompted.**
 
 ---
 
@@ -100,7 +100,7 @@ flowchart TD
         Snapshot["Deep Freeze & Snapshot Engine<br/>(Anti-accessor & mutation-proof)"]
         Canonicalizer["Canonical Request Normalizer<br/>(actionproof.request.v1)"]
         Commitment["Keccak-256 Canonical Commitment Engine"]
-        
+
         subgraph Independent Analysis & Evidence
             ABIDecoder["Independent ABI Decoder"]
             Multicall["Recursive Multicall Inspector"]
@@ -111,10 +111,10 @@ flowchart TD
 
         subgraph Deterministic Decision Engine
             Policy["Deterministic Policy Engine<br/>(Fail-Closed Logic)"]
-            Verdict{"Security Verdict<br/>(VERIFIED / BLOCKED / WARNING)"}
+            Verdict{"Security Verdict<br/>(VERIFIED / BLOCKED / WARNING / UNSUPPORTED / DEMO_VERIFIED)"}
         end
 
-        Barrier["Pre-Forward Commitment Barrier<br/>(In-Line Re-hash & Snapshot Validation)"]
+        Barrier["Pre-Forward Commitment Barrier<br/>(Canonical Derivation & Recheck)"]
     end
 
     subgraph Wallet Layer
@@ -129,9 +129,9 @@ flowchart TD
     ABIDecoder & Multicall & Sourcify & ERC7730 & Simulation --> Policy
     Policy --> Verdict
 
-    Verdict -->|"VERIFIED"| Barrier
-    Verdict -->|"BLOCKED / UNSUPPORTED"| Proxy
-    Barrier -->|"Re-check MATCH"| Wallet
+    Verdict -->|"VERIFIED / DEMO_VERIFIED"| Barrier
+    Verdict -->|"BLOCKED / UNSUPPORTED / UNCONFIRMED WARNING"| Proxy
+    Barrier -->|"Re-check MATCH (Derived Canonical)"| Wallet
     Barrier -.->|"COMMITMENT_MISMATCH"| Proxy
 ```
 
@@ -189,7 +189,7 @@ sequenceDiagram
 
     DApp->>Proxy: eth_sendTransaction(txRequest)
     activate Proxy
-    
+
     Proxy->>Snap: snapshotRequest(txRequest)
     activate Snap
     Note over Snap: Deep freeze object, disarm getters,<br/>break all memory references
@@ -209,14 +209,15 @@ sequenceDiagram
     Proxy->>Policy: evaluatePolicy(canonicalRequest, EvidenceBundle)
     activate Policy
     Policy->>Policy: Run Deterministic Policy Rules
-    Policy-->>Proxy: ActionProofVerdict (VERIFIED / BLOCKED / WARNING)
+    Policy-->>Proxy: ActionProofVerdict (VERIFIED / BLOCKED / WARNING / UNSUPPORTED / DEMO_VERIFIED)
     deactivate Policy
 
     alt Verdict is BLOCKED or UNSUPPORTED
         Proxy-->>DApp: Reject Promise (Error: Policy Blocked)
         Note over Proxy,Wallet: Execution HALTED. Request NEVER sent to wallet.
-    else Verdict is VERIFIED / ALLOWED
+    else Verdict is VERIFIED / DEMO_VERIFIED / CONFIRMED WARNING
         Proxy->>Proxy: executeSendTransaction() (Pre-Forward Recheck)
+        Proxy->>Proxy: forwardPayload = serializeCanonicalToRpcPayload(canonical)
         Proxy->>Proxy: recheck = computeCommitment(forwardPayload)
         alt recheck.hash != verifiedHash
             Proxy-->>DApp: Reject Promise (COMMITMENT_MISMATCH)
@@ -247,12 +248,15 @@ flowchart LR
         Snap["Snapshot & Deep Freeze<br/>(Getters executed, references severed)"]
         Canon1["Canonicalize<br/>(actionproof.request.v1)"]
         Hash1["Verified Commitment<br/>Keccak-256 (C_verified)"]
-        
+
         Eval["Evidence Collection &<br/>Policy Decision (VERIFIED)"]
 
-        Barrier{"Pre-Forward Barrier<br/>Re-Canonicalize Outgoing Payload"}
+        Barrier{"Pre-Forward Barrier<br/>Recheck & Serialize Canonical"}
         Hash2["Forward Commitment<br/>Keccak-256 (C_fwd)"]
         Check{"C_fwd == C_verified ?"}
+        Derive["Serialize Canonical<br/>serializeCanonicalToRpcPayload(canonical)"]
+        Hash3["Dispatched Commitment<br/>Keccak-256 (C_dispatch)"]
+        Check2{"C_dispatch == C_verified ?"}
     end
 
     subgraph Wallet Interface
@@ -262,10 +266,14 @@ flowchart LR
     Req -->|"Intercepted"| Snap
     Snap --> Canon1 --> Hash1
     Hash1 --> Eval --> Barrier
-    Barrier -->|"Payload about to dispatch"| Hash2
+    Barrier -->|"Snapshot payload"| Hash2
     Hash1 & Hash2 --> Check
-    Check -->|"YES (Match)"| Forward
-    Check -->|"NO (Mismatch)"| Halt["HALT: COMMITMENT_MISMATCH<br/>(Wallet NEVER Called)"]
+    Check -->|"MATCH"| Derive
+    Derive --> Hash3
+    Hash1 & Hash3 --> Check2
+    Check2 -->|"MATCH"| Forward
+    Check -.->|"MISMATCH"| Halt["HALT: COMMITMENT_MISMATCH<br/>(Wallet NEVER Called)"]
+    Check2 -.->|"MISMATCH"| Halt
 ```
 
 The Level-2 Invariant is mathematically expressed as:
@@ -290,7 +298,7 @@ JavaScript's dynamic object model creates opportunities for hostile scripts to e
 1. **Single-Pass Extraction:** Each property is read exactly once using `Object.getOwnPropertyDescriptor` during initial snapshotting.
 2. **Defensive Cloning:** Values are extracted into clean dictionaries created via `Object.create(null)` to eliminate prototype inheritance.
 3. **Recursive Deep Freezing:** All objects and nested arrays (such as `accessList`) are recursively frozen via `Object.freeze()`.
-4. **Isolated Memory:** The underlying wallet receives a freshly frozen snapshot, completely severed from DApp memory references.
+4. **Canonical RPC Forwarding:** The underlying wallet receives a cleanly serialized RPC payload derived directly from the verified canonical representation using `serializeCanonicalToRpcPayload(canonical)` and re-verified against the commitment, completely severed from DApp memory references.
 
 > For deep technical implementation details, see [`docs/11-TECHNICAL-DEEP-DIVE.md`](docs/11-TECHNICAL-DEEP-DIVE.md).
 
@@ -337,10 +345,12 @@ flowchart TD
 DeFi applications frequently use multicall contracts (`Multicall3`, `SwapRouter02`) to batch operations. Attackers exploit this to hide malicious approvals behind legitimate swaps:
 
 * **Recursive Unpacking:** ActionProof recursively traverses `aggregate3((address,bool,bytes)[])` and `multicall(bytes[])` up to a recursion depth limit, defending against stack overflow attacks.
-* **Approval Boundary Checking:** Policy rules strictly check token approvals against dangerous thresholds:
-  * $\text{threshold} \ge 2^{255} - 1$ (`MAX_UINT256`) $\rightarrow$ **FATAL VIOLATION**
-  * $\text{threshold} \ge 10^{30}$ (Excessive Allowance) $\rightarrow$ **FATAL VIOLATION**
-* **Stealth Detection & Intent Alignment:** If an unannounced approval is bundled inside a batch, policy enforcement immediately halts forwarding through `RULE_02A_NO_EXACT_UNLIMITED_APPROVALS` (unlimited approval check), `RULE_03_MULTICALL_CALL_INTEGRITY` (dangerous multicall subcall detection), and `RULE_04_APPLICATION_INTENT_ALIGNMENT` (intent-to-action contradiction detection when a swap is claimed but approval is executed).
+* **Deterministic Approval Classification (H5):** Policy rules categorize approvals using deterministic thresholds:
+  * `EXACT_UNLIMITED`: `amount === (2^256 - 1)` (`UINT256_MAX`) $\rightarrow$ **FATAL VIOLATION** (`RULE_02A`).
+  * **Decimal-Aware Normalization:** When token decimals are known and trusted from contract fixtures, the raw amount is normalized to human-readable whole tokens ($\text{raw} / 10^{\text{decimals}}$). An allowance $\ge 1,000,000$ whole tokens is classified as `HIGH_VALUE_APPROVAL` (`RULE_02B`).
+  * **Conservative Fallback:** When token decimals are unavailable or untrusted, ActionProof refuses to assume 18 decimals; it falls back to evaluating against a raw threshold of $10^{30}$ base units.
+  * *Policy Choice Note:* The 1,000,000 whole-token threshold is ActionProof's deterministic policy and design choice, not a universal security truth.
+* **Stealth Detection & Recipient Binding:** If an unannounced approval is bundled inside a batch, policy enforcement immediately halts forwarding through `RULE_02A` (unlimited approval check), `RULE_03` (dangerous multicall subcall detection), `RULE_04` (intent contradiction detection), and `RULE_09_RECIPIENT_INTEGRITY` (recipient / destination binding).
 
 ---
 
@@ -348,7 +358,9 @@ DeFi applications frequently use multicall contracts (`Multicall3`, `SwapRouter0
 
 ActionProof queries contract verification registries to authenticate target smart contracts:
 * **Bytecode & Metadata Matching:** Verifies whether target bytecode matches authenticated open-source Solidity/Vyper code.
-* **Deterministic Fixture Provenance:** In the evaluator demo and unit tests, the adapter uses a deterministic `LOCAL_FIXTURE` with explicit provenance annotations to ensure hermetic, zero-flakiness testing.
+* **Strict Provenance Boundary (M4):**
+  * In `PRODUCTION` mode, `LOCAL_FIXTURE` evidence cannot establish a security-grade `VERIFIED` verdict and degrades to `WARNING`. Production `VERIFIED` requires live external evidence (e.g. via `createLiveEvidencePipeline()`).
+  * In `DEMO` mode, local deterministic fixtures produce `DEMO_VERIFIED`, which is visibly distinct from production `VERIFIED`.
 
 ---
 
@@ -364,35 +376,43 @@ ERC-7730 standardizes clear-signing metadata for hardware wallets and pre-signin
 
 ActionProof predicts the state transition consequences of the transaction before authorization:
 * **Balance Delta Extraction:** Calculates predicted token deltas (e.g. `-100 USDC`, `+0.038 ETH`).
-* **Explicit Provenance Annotations:** ActionProof never misrepresents fixture simulation as live blockchain execution. Every simulation artifact explicitly displays:
-  * `LOCAL_FIXTURE`: Deterministic local simulation fixture (used in demo and tests).
-  * `LIVE_EVM`: Live execution against an archive node or EVM fork.
-  * `UNAVAILABLE`: Simulation provider not configured.
+* **Explicit Provenance Annotations (M4):** ActionProof never misrepresents fixture simulation as live blockchain execution. Every simulation artifact explicitly displays:
+  * `LOCAL_FIXTURE`: Deterministic local simulation fixture (produces `DEMO_VERIFIED` in demo mode, degrades to `WARNING` in production mode).
+  * `LIVE_BACKEND`: Live execution against an archive node or EVM fork.
+  * `UNAVAILABLE`: Simulation provider not configured (degrades to `WARNING`).
 * **TOCTOU Advisory:** ActionProof explicitly warns that simulation results reflect state at check time; mempool front-running or sandwich attacks prior to block inclusion remain possible.
 
 ---
 
 ## 14. Deterministic Policy Engine & Ruleset
 
-Verdicts are issued exclusively by deterministic mathematical rules in [`src/policy/rules.ts`](src/policy/rules.ts)—**zero probabilistic LLM authority**:
+Verdicts are issued exclusively by deterministic mathematical rules in [`src/policy/rules.ts`](src/policy/rules.ts)—**zero probabilistic LLM authority**.
+
+### Verdict Taxonomy:
+* **`VERIFIED`:** Production-grade security verification with live external evidence.
+* **`DEMO_VERIFIED`:** Deterministic fixture provenance passed all policy rules in demo mode. Explicitly NOT equivalent to production `VERIFIED`.
+* **`WARNING`:** Degraded evidence (e.g. unverified contract, local fixture in production mode, unavailable simulation) halted fail-closed awaiting explicit user confirmation.
+* **`BLOCKED`:** Security policy violation, commitment mismatch, or hostile calldata detected. Forwarding is aborted.
+* **`UNSUPPORTED`:** Unsupported RPC methods or transaction schemas (ERC-4337, EIP-7702, EIP-5792, blobs). Execution halted fail-closed.
 
 | Rule ID | Rule Name | Trigger Condition | Severity | Verdict Impact |
 |---|---|---|---|---|
 | **RULE_01** | `REQUEST_BINDING` | Forwarded commitment $\neq$ verified commitment | FATAL | **`BLOCKED`** (`COMMITMENT_MISMATCH`) |
 | **RULE_02A** | `NO_EXACT_UNLIMITED_APPROVALS` | Token approval $= 2^{256}-1$ (`type(uint256).max`) | FATAL | **`BLOCKED`** |
-| **RULE_02B** | `HIGH_VALUE_APPROVAL_CHECK` | Token approval $\ge 10^{30}$ | FATAL / WARNING | **`BLOCKED`** (configurable) |
+| **RULE_02B** | `HIGH_VALUE_APPROVAL_CHECK` | Token approval $\ge 1,000,000$ whole tokens (or $\ge 10^{30}$ raw fallback) | FATAL / WARNING | **`BLOCKED`** (configurable) |
 | **RULE_03** | `MULTICALL_CALL_INTEGRITY` | Dangerous actions / stealth approvals inside multicall batch | FATAL | **`BLOCKED`** |
 | **RULE_04** | `APPLICATION_INTENT_ALIGNMENT` | Contradiction between declared intent and decoded call tree | FATAL | **`BLOCKED`** |
 | **RULE_05** | `SIMULATION_EXECUTION` | Simulation reverts or execution error during EVM run | FATAL / WARNING | **`BLOCKED`** / **`WARNING`** |
 | **RULE_06** | `CONTRACT_CORRESPONDENCE` | Target contract unverified on Sourcify | WARNING | **`WARNING`** (Degraded) |
 | **RULE_07** | `CLEAR_SIGNING_DESCRIPTOR` | ERC-7730 descriptor absent or values mismatch calldata | FATAL / WARNING | **`BLOCKED`** / **`WARNING`** |
 | **RULE_08** | `CALLDATA_DECODING_STATUS` | Unrecognized function selector or undecodable calldata | FATAL | **`BLOCKED` (`UNKNOWN_CALLDATA`)** |
+| **RULE_09** | `RECIPIENT_INTEGRITY` | Unbound transfer recipient or unbound approval spender | FATAL | **`BLOCKED`** |
 
-> **Note on Unsupported Types:** Transactions containing EIP-7702 `authorizationList`, blobs, or unsupported transaction types fail closed at Stage 1 schema validation with **`UNSUPPORTED`** before reaching the policy engine.
+> **Note on Unsupported Types:** Transactions containing ERC-4337 UserOperations, EIP-7702 `authorizationList`, blobs, or unsupported transaction types fail closed with **`UNSUPPORTED`** before reaching the policy engine.
 
 ---
 
-## 15. Pre-Forward Commitment Barrier & Re-check
+## 15. Pre-Forward Commitment Barrier & Canonical Forwarding
 
 The pre-forward barrier is enforced in-line immediately prior to wallet dispatch inside `ActionProofProviderProxy.executeSendTransaction()` in [`src/provider/proxy.ts`](src/provider/proxy.ts):
 
@@ -402,8 +422,8 @@ The pre-forward barrier is enforced in-line immediately prior to wallet dispatch
 const forwardPayload = createImmutableSnapshot(liveRequest) as Record<string, unknown>;
 validateRequestShape(forwardPayload);
 
-// 2. Pre-forward recheck: recompute commitment on the exact snapshot about to be forwarded
-const forwardCommitment = computeCommitment(forwardPayload, this.activeChainId);
+// 2. Pre-forward recheck: recompute commitment on the outgoing snapshot
+const forwardCommitment = computeCommitment(forwardPayload, activeWalletChainId);
 
 // 3. Strict commitment equality invariant
 if (forwardCommitment.hash !== verifiedCommitment.hash) {
@@ -423,9 +443,30 @@ if (forwardCommitment.hash !== verifiedCommitment.hash) {
     blockedBeforeForwarding: true,
   };
 }
+
+// 4. Derive dispatched RPC payload directly from the verified canonical representation (M2 & M3)
+const forwardRpcPayload = serializeCanonicalToRpcPayload(verifiedCommitment.canonical);
+
+// 5. Verify dispatched payload commitment matches verified commitment before calling wallet
+const dispatchedCommitment = computeCommitment(forwardRpcPayload, activeWalletChainId);
+if (dispatchedCommitment.hash !== verifiedCommitment.hash) {
+  evidence.binding.status = 'MISMATCH';
+  evidence.policy.verdict = 'BLOCKED';
+  return {
+    verdict: 'BLOCKED',
+    reason: 'DISPATCH_COMMITMENT_MISMATCH',
+    // ...
+  };
+}
+
+// 6. Forward only the verified canonical payload
+const rawTxHash = await this.wallet.request({
+  method: 'eth_sendTransaction',
+  params: [forwardRpcPayload],
+});
 ```
 
-If a hostile script or extension mutates `to`, `data`, `value`, or `gas` in memory after verification, the barrier re-computes the Keccak-256 commitment on the outgoing snapshot, detects divergence, and aborts before `underlyingProvider.request()` is ever called.
+If a hostile script or extension mutates `to`, `data`, `value`, or `gas` in memory after verification, the barrier detects divergence and aborts before `underlyingProvider.request()` is ever called.
 
 ---
 
@@ -490,7 +531,7 @@ flowchart TD
         SmartBug["Smart Contract Economic / Reentrancy Bugs<br/>(ActionProof decodes calls, cannot fix vulnerable contracts)"]
         SimTOCTOU["Mempool TOCTOU & Sandwich Attacks<br/>(State changes between simulation and block inclusion)"]
         DirectBypass["Direct RPC / Native Extension Bypass<br/>(Adversary calling external node without window.ethereum)"]
-        AltWrites["Alternative Write Paths (EIP-7702, EIP-5792, Blobs)<br/>(Fails closed with UNSUPPORTED in MVP)"]
+        AltWrites["Alternative Write Paths (ERC-4337, EIP-7702, EIP-5792, Blobs)<br/>(Fails closed with UNSUPPORTED in MVP)"]
         LiveRPC["Live On-Chain Tracing Simulation<br/>(MVP uses LOCAL_FIXTURE provenance)"]
     end
 ```
@@ -507,7 +548,15 @@ ActionProof adheres to rigorous security honesty:
 2. **Smart Contract Logic Bugs:** ActionProof decodes calldata and checks contract authenticity, but cannot prevent economic failure (e.g. reentrancy or oracle exploits) in verified contracts.
 3. **Simulation TOCTOU:** Mempool front-running and state changes between simulation and block mining are inherent to public blockchains.
 4. **Direct Provider Bypass:** If malicious software connects directly to external RPC endpoints without calling `window.ethereum`, an in-process proxy cannot intercept it.
-5. **Unsupported Features Fail Closed:** Modern features (EIP-7702, EIP-5792, blobs) safely fail closed with `UNSUPPORTED`.
+5. **Unsupported Features Fail Closed:** Modern transaction types and features fail closed with `UNSUPPORTED`. Specifically:
+   * **ERC-4337 (`eth_sendUserOperation`, `eth_estimateUserOperationGas`):** Blocked fail-closed at proxy boundary.
+   * **EIP-7702 (`authorizationList`):** Blocked at schema validation.
+   * **EIP-5792 (`wallet_sendCalls`):** Blocked as unsupported dangerous method.
+   * **EIP-4844 (`blobs`, `blobVersionedHashes`):** Blocked at schema validation.
+   * **EIP-712 / Typed-Data Signing (`eth_signTypedData*`):** Blocked as unsupported dangerous method.
+   * **Permit / Permit2 Signatures:** Off-chain permit signing is outside MVP transaction scope.
+   * **Contract Creation (omitted `to`):** Unsupported in MVP.
+   * **Unknown Transaction Types & Unknown Calldata:** Blocked fail-closed.
 
 ---
 
@@ -515,11 +564,13 @@ ActionProof adheres to rigorous security honesty:
 
 | # | Scenario Name | DApp Claim (Untrusted) | Calldata Semantics | Policy Verdict | Pre-Forward Barrier | Forwarded to Wallet? | Wallet Call Count |
 |---|---|---|---|---|---|---|---|
-| **1** | **Normal Supported Swap** | *"Swap 100 USDC for ETH on Uniswap V3"* | Valid `exactInputSingle` parameters | **`VERIFIED`** | Matches ($\mathcal{C}_{\text{fwd}} = \mathcal{C}_{\text{verified}}$) | **YES** | **1** |
+| **1** | **Normal Supported Swap** | *"Swap 100 USDC for ETH on Uniswap V3"* | Valid `exactInputSingle` parameters | **`DEMO_VERIFIED`** / **`VERIFIED`** | Matches ($\mathcal{C}_{\text{fwd}} = \mathcal{C}_{\text{verified}}$) | **YES** | **1** |
 | **2** | **Hidden Unlimited Approval** | *"Swap 100 USDC for ETH"* | `multicall` with hidden `approve(attacker, MAX_UINT)` | **`BLOCKED`** | Blocked at policy stage | **NO** | **0** |
 | **3** | **Post-Verification Mutation** | *"Swap 100 USDC for ETH"* | Valid calldata, but `to` mutated post-verification | **`COMMITMENT_ MISMATCH`** | **Tripped!** ($\mathcal{C}_{\text{fwd}} \neq \mathcal{C}_{\text{verified}}$) | **NO** | **0** |
 | **4** | **Unknown Calldata** | *"Claim Staking Rewards"* | Unrecognized selector `0x12345678...` | **`BLOCKED`** (UNKNOWN_CALLDATA) | Blocked at policy stage | **NO** | **0** |
 | **5** | **Unsupported Type (EIP-7702)** | *"Delegate Account Execution"* | Type-4 payload with `authorizationList` | **`UNSUPPORTED`** | Blocked at schema stage | **NO** | **0** |
+
+> *Note on Scenario 1:* In the demo console (using default deterministic local fixtures), the verdict is `DEMO_VERIFIED` to honestly indicate fixture provenance. In production mode with live evidence adapters (e.g. via `createLiveEvidencePipeline()`), the verdict is `VERIFIED`.
 
 > For comprehensive scenario walkthroughs, see [`docs/09-DEMO-SCENARIOS.md`](docs/09-DEMO-SCENARIOS.md).
 
@@ -553,7 +604,7 @@ npm install
 
 # 3. Run the automated verification triad
 npx tsc --noEmit       # Strict TypeCheck (0 errors)
-npm test              # Full Test Suite (86 passing)
+npm test              # Full Test Suite (197 passing)
 npm run build         # Production Build
 
 # 4. Launch the Interactive Demo UI
@@ -570,7 +621,7 @@ Open **`http://localhost:5173`** in your browser.
 ActionProof enforces a strict automated verification triad:
 
 1. **Static Type Safety:** `npx tsc --noEmit` verifies strict TypeScript compilation with zero errors or warnings.
-2. **Deterministic Test Execution:** `npm test` runs 86 unit, integration, and security tests across 7 test suites.
+2. **Deterministic Test Execution:** `npm test` runs 197 unit, integration, and security tests across 7 test suites.
 3. **Hermetic Production Compilation:** `npm run build` compiles clean production assets in under 3 seconds.
 
 ---
@@ -579,17 +630,17 @@ ActionProof enforces a strict automated verification triad:
 
 ```text
 Test Suites: 7 passed, 7 total
-Tests:       86 passed, 86 total
+Tests:       197 passed, 197 total
 ```
 
 | Test Suite | File Path | Test Count | Key Invariants Verified |
 |---|---|---|---|
 | **Demo Observability** | `tests/ui/demo-observability.test.ts` | 6 | Ready state on selection, explicit execution, counter increment, runtime timestamp capture, clean reset. |
-| **Provider Binding** | `tests/provider/provider-binding.test.ts` | 26 | Formal Tests 1–12, getter disarming, in-flight mutation detection, circular reference rejection, accessList isolation. |
-| **Canonical Normalization** | `tests/canonical/canonical.test.ts` | 14 | Schema whitelisting, address lowercasing, quantity trimming, accessList sorting, Keccak-256 serialization determinism. |
-| **Policy Engine** | `tests/policy/policy.test.ts` | 21 | Deterministic policy evaluation, RULE_04 intent contradiction matrix, fail-closed unknown calldata, approval threshold enforcement. |
-| **Multicall Analysis** | `tests/analysis/multicall.test.ts` | 9 | Recursive multicall unrolling (3 levels deep), stealth approval isolation, approval boundary checks (`MAX_UINT256`, `10^30`). |
-| **Integration E2E** | `tests/integration/end-to-end.test.ts` | 5 | Full pipeline flows for normal swaps, attacks, mutations, unknown calldata, and EIP-7702 delegation. |
+| **Provider Binding** | `tests/provider/provider-binding.test.ts` | 83 | Formal Tests 1–12, getter disarming, in-flight mutation detection, circular reference rejection, accessList isolation, H1 structured intent default-deny, H2 recipient/spender binding, H4 chain synchronization, M2 canonical RPC forwarding, M3 mutation barrier hardening, SEC-AA-01 ERC-4337 blocking. |
+| **Canonical Normalization** | `tests/canonical/canonical.test.ts` | 22 | Schema whitelisting, address lowercasing, quantity trimming, accessList sorting, Keccak-256 serialization determinism, canonical RPC payload serializer. |
+| **Policy Engine** | `tests/policy/policy.test.ts` | 65 | Deterministic policy evaluation, RULE_04 intent contradiction matrix, fail-closed unknown calldata, H5 decimal-aware approval threshold, RULE_09 recipient integrity, M4 provenance degradation. |
+| **Multicall Analysis** | `tests/analysis/multicall.test.ts` | 9 | Recursive multicall unrolling (3 levels deep), stealth approval isolation, approval boundary checks (`MAX_UINT256`, $10^{30}$). |
+| **Integration E2E** | `tests/integration/end-to-end.test.ts` | 7 | Full pipeline flows for normal swaps, attacks, mutations, unknown calldata, EIP-7702 delegation, and live pipeline mode. |
 | **Evidence Honesty** | `tests/analysis/evidence-honesty.test.ts` | 5 | Simulation provenance (`LOCAL_FIXTURE` vs `LIVE_EXTERNAL`), Sourcify and ERC-7730 honest labeling. |
 
 ---
@@ -639,14 +690,15 @@ ActionProof/
 │   │
 │   ├── intent/                            # Intent Evidence & Matching
 │   │   ├── erc7730.ts                     # ERC-7730 clear-signing format adapter
-│   │   └── intent-provider.ts             # Application intent capture interface
+│   │   ├── intent-provider.ts             # Application intent capture interface
+│   │   └── structured.ts                  # Structured intent definitions & categories
 │   │
 │   ├── evidence/                          # Multi-Source Evidence Pipeline
 │   │   ├── types.ts                       # CompleteEvidence & evidence bundle schemas
 │   │   └── pipeline.ts                    # EvidencePipeline aggregator & coordinator
 │   │
 │   ├── policy/                            # Deterministic Policy Engine
-│   │   ├── rules.ts                       # 9 deterministic rules & RULE_04 contradiction detector
+│   │   ├── rules.ts                       # Deterministic rules (RULE_01-09) & contradiction detector
 │   │   └── engine.ts                      # DeterministicPolicyEngine evaluator
 │   │
 │   └── ui/                                # Evaluator Security Console
@@ -654,14 +706,14 @@ ActionProof/
 │       ├── runner.ts                      # DemoRunner execution state machine
 │       ├── scenarios.ts                   # Evaluator scenario fixtures
 │       ├── main.tsx                       # React application entrypoint
-│       └── index.css                      # Terminal UI styling
+│       └── styles.css                     # Terminal UI styling
 │
-└── tests/                                 # Deterministic Automated Test Suite (86 tests)
-    ├── canonical/                         # Normalization & schema tests (14 tests)
-    ├── provider/                          # Provider binding & mutation tests (26 tests)
+└── tests/                                 # Deterministic Automated Test Suite (197 tests)
+    ├── canonical/                         # Normalization & schema tests (22 tests)
+    ├── provider/                          # Provider binding & mutation tests (83 tests)
     ├── analysis/                          # Multicall & evidence honesty tests (14 tests)
-    ├── policy/                            # Policy determinism & RULE_04 tests (21 tests)
-    ├── integration/                       # End-to-end scenario tests (5 tests)
+    ├── policy/                            # Policy determinism & RULE_04 tests (65 tests)
+    ├── integration/                       # End-to-end scenario tests (7 tests)
     └── ui/                                # Demo observability tests (6 tests)
 ```
 

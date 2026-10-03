@@ -23,22 +23,31 @@ import { decodeTransactionCalldata } from '../analysis/decoder.js';
 import {
   type ContractEvidenceProvider,
   SourcifyContractAdapter,
+  MockLiveContractAdapter,
 } from '../analysis/contract.js';
 import {
   type SimulationAdapter,
   UnavailableSimulationAdapter,
+  MockLiveSimulationAdapter,
 } from '../analysis/simulation.js';
 import {
   type IntentProvider,
   ERC7730v2Adapter,
+  MockLiveERC7730Adapter,
+  resolveStructuredIntent,
+  type StructuredIntent,
 } from '../intent/index.js';
-import { DeterministicPolicyEngine } from '../policy/index.js';
+import { DeterministicPolicyEngine, type PolicyRuleOptions, type ProvenanceMode } from '../policy/index.js';
 
 export interface EvidencePipelineOptions {
   contractProvider?: ContractEvidenceProvider;
+  contractAdapter?: ContractEvidenceProvider;
   simulationAdapter?: SimulationAdapter;
   intentProvider?: IntentProvider;
+  erc7730Adapter?: IntentProvider;
   policyEngine?: DeterministicPolicyEngine;
+  policyEngineOptions?: PolicyRuleOptions;
+  provenanceMode?: ProvenanceMode;
 }
 
 export class EvidencePipeline {
@@ -48,22 +57,32 @@ export class EvidencePipeline {
   public readonly policyEngine: DeterministicPolicyEngine;
 
   constructor(options: EvidencePipelineOptions = {}) {
-    this.contractProvider = options.contractProvider ?? new SourcifyContractAdapter();
+    this.contractProvider = options.contractProvider ?? options.contractAdapter ?? new SourcifyContractAdapter();
     this.simulationAdapter = options.simulationAdapter ?? new UnavailableSimulationAdapter();
-    this.intentProvider = options.intentProvider ?? new ERC7730v2Adapter();
-    this.policyEngine = options.policyEngine ?? new DeterministicPolicyEngine();
+    this.intentProvider = options.intentProvider ?? options.erc7730Adapter ?? new ERC7730v2Adapter();
+    const policyOptions: PolicyRuleOptions = {
+      ...(options.provenanceMode ? { provenanceMode: options.provenanceMode } : {}),
+      ...(options.policyEngineOptions ?? {}),
+    };
+    this.policyEngine = options.policyEngine ?? new DeterministicPolicyEngine(policyOptions);
   }
 
   async runPipeline(
     canonical: CanonicalTransactionRequest,
     commitment: RequestCommitment,
-    declaredAction = 'Swap 100 USDC -> ETH',
+    declaredAction: string | StructuredIntent = 'Swap 100 USDC -> ETH',
     actionSource: 'DAPP_UI' | 'TEST_FIXTURE' = 'DAPP_UI'
   ): Promise<CompleteEvidence> {
+    const rawDeclaredAction = typeof declaredAction === 'string'
+      ? declaredAction
+      : (declaredAction?.rawDescription ?? `${declaredAction?.category ?? 'UNKNOWN'} action`);
+    const structuredIntent = resolveStructuredIntent(declaredAction);
+
     // 1. Application evidence (explicitly marked as untrusted claim)
     const application: ApplicationEvidence = {
-      status: declaredAction ? 'AVAILABLE' : 'ABSENT',
-      declaredAction,
+      status: rawDeclaredAction ? 'AVAILABLE' : 'ABSENT',
+      declaredAction: rawDeclaredAction,
+      structuredIntent,
       source: actionSource,
       isUntrustedClaim: true,
     };
@@ -124,4 +143,20 @@ export class EvidencePipeline {
       policy,
     };
   }
+}
+
+/**
+ * Creates an EvidencePipeline configured with live-grade mock evidence adapters.
+ * Honestly emits LIVE_EXTERNAL, LIVE_REGISTRY, and LIVE_BACKEND provenance.
+ */
+export function createLiveEvidencePipeline(policyEngineOptions: PolicyRuleOptions = {}): EvidencePipeline {
+  return new EvidencePipeline({
+    contractProvider: new MockLiveContractAdapter(),
+    intentProvider: new MockLiveERC7730Adapter(),
+    simulationAdapter: new MockLiveSimulationAdapter(),
+    policyEngine: new DeterministicPolicyEngine({
+      provenanceMode: 'PRODUCTION',
+      ...policyEngineOptions,
+    }),
+  });
 }
