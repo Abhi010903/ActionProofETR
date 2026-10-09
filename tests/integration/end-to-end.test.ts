@@ -11,8 +11,10 @@ import {
   UINT256_MAX,
 } from '../../src/analysis/decoder.js';
 import { MULTICALL_ABIS } from '../../src/analysis/multicall.js';
-import { EvidencePipeline, createLiveEvidencePipeline } from '../../src/evidence/pipeline.js';
-import { LocalFixtureSimulationAdapter } from '../../src/analysis/simulation.js';
+import { EvidencePipeline } from '../../src/evidence/pipeline.js';
+import { LiveSourcifyContractAdapter } from '../../src/analysis/contract.js';
+import { LiveRPCSimulationAdapter, LocalFixtureSimulationAdapter } from '../../src/analysis/simulation.js';
+import { LiveRegistryERC7730Adapter, LOCAL_DESCRIPTOR_FIXTURES } from '../../src/intent/erc7730.js';
 
 const USER = '0x04f8996da763b7a969b1028ee3007569eaf3a635' as const;
 const ROUTER = '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45' as const;
@@ -20,10 +22,43 @@ const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' as const;
 const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' as const;
 const ATTACKER = '0xe64ba38a4b958c72bc0d421150ba464636422485' as const;
 
+// Protocol/adapter test double: verifies adapter processing of external HTTP/RPC responses, NOT proof of live service availability.
+function createProtocolTestPipeline(): EvidencePipeline {
+  return new EvidencePipeline({
+    contractAdapter: new LiveSourcifyContractAdapter({
+      apiUrl: 'https://sourcify.dev/server',
+      fetchFn: async () =>
+        new Response(JSON.stringify([{ address: ROUTER, status: 'perfect', chainIds: [1] }]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    }),
+    simulationAdapter: new LiveRPCSimulationAdapter({
+      rpcProvider: {
+        request: async ({ method }: { method: string }) => {
+          if (method === 'eth_chainId') return '0x1';
+          if (method === 'eth_blockNumber') return '0x13d05fc';
+          if (method === 'eth_call') return '0x0000000000000000000000000000000000000000000000000000000000000001';
+          return '0x0';
+        },
+      },
+    }),
+    erc7730Adapter: new LiveRegistryERC7730Adapter({
+      registryUrl: 'https://registry.erc7730.org',
+      fetchFn: async () =>
+        new Response(JSON.stringify(LOCAL_DESCRIPTOR_FIXTURES[ROUTER]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    }),
+    provenanceMode: 'PRODUCTION',
+  });
+}
+
 describe('End-to-End Integration Tests', () => {
-  it('E2E Normal: Swap 100 USDC -> ETH succeeds end-to-end with live evidence -> VERIFIED status and forwards', async () => {
+  it('E2E Normal: Swap 100 USDC -> ETH succeeds end-to-end with protocol test-double evidence -> VERIFIED status and forwards', async () => {
     const wallet = new MockWalletProvider();
-    const pipeline = createLiveEvidencePipeline();
+    const pipeline = createProtocolTestPipeline();
     const proxy = new ActionProofProviderProxy(wallet, {
       declaredAction: 'Swap 100 USDC -> ETH',
       evidencePipeline: pipeline,

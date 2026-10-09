@@ -171,8 +171,8 @@ export class SourcifyContractAdapter implements ContractEvidenceProvider {
 }
 
 /**
- * Mock live contract evidence provider for testing and verification against live-grade evidence.
- * Honestly emits LIVE_EXTERNAL provenance without making actual network calls.
+ * Mock contract evidence provider for testing and demonstration.
+ * Honestly emits LOCAL_FIXTURE provenance; strictly prevented from manufacturing LIVE_EXTERNAL.
  */
 export class MockLiveContractAdapter implements ContractEvidenceProvider {
   constructor(private readonly fixtures = KNOWN_CONTRACT_FIXTURES) {}
@@ -183,8 +183,8 @@ export class MockLiveContractAdapter implements ContractEvidenceProvider {
     if (fixture) {
       return {
         status: 'VERIFIED_CORRESPONDENCE',
-        provenance: 'LIVE_EXTERNAL',
-        sourceDescription: 'Sourcify live verified source/bytecode correspondence',
+        provenance: 'LOCAL_FIXTURE',
+        sourceDescription: 'verified source/bytecode correspondence fixture (local mock fixture)',
         address,
         matchType: fixture.matchType,
         contractName: fixture.name,
@@ -195,8 +195,8 @@ export class MockLiveContractAdapter implements ContractEvidenceProvider {
     }
     return {
       status: 'UNVERIFIED',
-      provenance: 'LIVE_EXTERNAL',
-      sourceDescription: 'Sourcify live lookup: contract source code not found',
+      provenance: 'NONE',
+      sourceDescription: 'Sourcify fixture lookup: contract source code not found in fixture set',
       address,
       matchType: 'NONE',
       contractName: null,
@@ -205,3 +205,236 @@ export class MockLiveContractAdapter implements ContractEvidenceProvider {
     };
   }
 }
+
+export interface LiveSourcifyConfig {
+  apiUrl?: string;
+  fetchFn?: typeof fetch;
+  timeoutMs?: number;
+  localFixtures?: Record<string, ContractFixtureDetail>;
+}
+
+/**
+ * Live Sourcify contract evidence provider.
+ * Queries live Sourcify correspondence and emits LIVE_EXTERNAL provenance ONLY
+ * after receiving and validating a genuine HTTP response from the Sourcify API.
+ * Never labels in-memory fixtures as LIVE_EXTERNAL. If localFixtures are provided
+ * and matched, honestly emits LOCAL_FIXTURE.
+ * Fails closed to UNAVAILABLE/NONE on missing configuration, network error, timeout, or malformed response.
+ */
+export class LiveSourcifyContractAdapter implements ContractEvidenceProvider {
+  constructor(private readonly config: LiveSourcifyConfig = {}) {}
+
+  async getContractEvidence(address: `0x${string}`, chainId: number): Promise<ContractEvidence> {
+    const normalized = address.toLowerCase() as `0x${string}`;
+
+    // If local fixtures are configured and hit, honestly emit LOCAL_FIXTURE, NEVER LIVE_EXTERNAL
+    if (this.config.localFixtures) {
+      const fixture = this.config.localFixtures[normalized];
+      if (fixture) {
+        return {
+          status: 'VERIFIED_CORRESPONDENCE',
+          provenance: 'LOCAL_FIXTURE',
+          sourceDescription: 'Sourcify local fixture match (local fixture fallback)',
+          address,
+          matchType: fixture.matchType,
+          contractName: fixture.name,
+          compiler: fixture.compiler,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          decimals: fixture.decimals ?? null,
+        };
+      }
+    }
+
+    // Live lookup requires an explicit API URL or injectable fetch function
+    if (!this.config.apiUrl && !this.config.fetchFn) {
+      return {
+        status: 'UNAVAILABLE',
+        provenance: 'NONE',
+        sourceDescription: 'No Sourcify API URL or fetch function configured for live contract verification',
+        address,
+        matchType: 'NONE',
+        contractName: null,
+        compiler: null,
+        disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+      };
+    }
+
+    const apiUrl = (this.config.apiUrl ?? 'https://sourcify.dev/server').replace(/\/$/, '');
+    const fetchFn = this.config.fetchFn ?? globalThis.fetch;
+    const timeoutMs = this.config.timeoutMs ?? 5000;
+    const endpoint = `${apiUrl}/check-by-addresses?addresses=${normalized}&chainIds=${chainId}`;
+
+    try {
+      const res = await fetchFn(endpoint, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (!res.ok) {
+        return {
+          status: 'UNAVAILABLE',
+          provenance: 'NONE',
+          sourceDescription: `Sourcify live lookup failed: HTTP error ${res.status}`,
+          address,
+          matchType: 'NONE',
+          contractName: null,
+          compiler: null,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+        };
+      }
+
+      const json = (await res.json()) as unknown;
+      if (!Array.isArray(json) || json.length === 0) {
+        return {
+          status: 'UNAVAILABLE',
+          provenance: 'NONE',
+          sourceDescription: 'Sourcify live lookup failed: response is not a valid array of check results',
+          address,
+          matchType: 'NONE',
+          contractName: null,
+          compiler: null,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+        };
+      }
+
+      const match = json.find(
+        (item: unknown) =>
+          typeof item === 'object' &&
+          item !== null &&
+          'address' in item &&
+          typeof (item as { address: unknown }).address === 'string' &&
+          (item as { address: string }).address.toLowerCase() === normalized
+      ) as { address: string; status: unknown; chainIds?: unknown } | undefined;
+
+      if (!match) {
+        return {
+          status: 'UNAVAILABLE',
+          provenance: 'NONE',
+          sourceDescription: 'Sourcify live lookup failed: response does not contain a record for requested address',
+          address,
+          matchType: 'NONE',
+          contractName: null,
+          compiler: null,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+        };
+      }
+
+      // If chainIds is provided in the response record, validate against requested chainId
+      if (match.chainIds !== undefined) {
+        if (!Array.isArray(match.chainIds)) {
+          return {
+            status: 'UNAVAILABLE',
+            provenance: 'NONE',
+            sourceDescription: 'Sourcify live lookup failed: malformed chainIds property in response record',
+            address,
+            matchType: 'NONE',
+            contractName: null,
+            compiler: null,
+            disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          };
+        }
+
+        const parsedChainIds: number[] = [];
+        for (const item of match.chainIds) {
+          let parsed: number | null = null;
+          if (typeof item === 'number' && Number.isInteger(item) && item > 0) {
+            parsed = item;
+          } else if (typeof item === 'string' && /^\d+$/.test(item.trim())) {
+            parsed = parseInt(item.trim(), 10);
+          }
+          if (parsed === null) {
+            return {
+              status: 'UNAVAILABLE',
+              provenance: 'NONE',
+              sourceDescription: 'Sourcify live lookup failed: malformed chain ID in response chainIds array',
+              address,
+              matchType: 'NONE',
+              contractName: null,
+              compiler: null,
+              disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+            };
+          }
+          parsedChainIds.push(parsed);
+        }
+
+        if (parsedChainIds.length === 0 || !parsedChainIds.includes(chainId)) {
+          return {
+            status: 'UNAVAILABLE',
+            provenance: 'NONE',
+            sourceDescription: `Sourcify live lookup failed: response chainIds [${parsedChainIds.join(', ')}] do not include requested chainId ${chainId}`,
+            address,
+            matchType: 'NONE',
+            contractName: null,
+            compiler: null,
+            disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          };
+        }
+      }
+
+      if (match.status === 'false') {
+        return {
+          status: 'UNVERIFIED',
+          provenance: 'LIVE_EXTERNAL',
+          sourceDescription: 'Sourcify live lookup confirmed: contract source code is unverified',
+          address,
+          matchType: 'NONE',
+          contractName: null,
+          compiler: null,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+        };
+      }
+
+      if (match.status === 'perfect') {
+        return {
+          status: 'VERIFIED_CORRESPONDENCE',
+          provenance: 'LIVE_EXTERNAL',
+          sourceDescription: 'Sourcify live verified source/bytecode correspondence (perfect match)',
+          address,
+          matchType: 'FULL_MATCH',
+          contractName: null,
+          compiler: null,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          decimals: null,
+        };
+      }
+
+      if (match.status === 'partial') {
+        return {
+          status: 'VERIFIED_CORRESPONDENCE',
+          provenance: 'LIVE_EXTERNAL',
+          sourceDescription: 'Sourcify live verified source/bytecode correspondence (partial match)',
+          address,
+          matchType: 'PARTIAL_MATCH',
+          contractName: null,
+          compiler: null,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          decimals: null,
+        };
+      }
+
+      return {
+        status: 'UNAVAILABLE',
+        provenance: 'NONE',
+        sourceDescription: `Sourcify live lookup failed: unrecognized verification status '${String(match.status)}'`,
+        address,
+        matchType: 'NONE',
+        contractName: null,
+        compiler: null,
+        disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+      };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        status: 'UNAVAILABLE',
+        provenance: 'NONE',
+        sourceDescription: `Sourcify live lookup failed: ${message}`,
+        address,
+        matchType: 'NONE',
+        contractName: null,
+        compiler: null,
+        disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+      };
+    }
+  }
+}
+

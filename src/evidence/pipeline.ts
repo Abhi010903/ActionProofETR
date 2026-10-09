@@ -24,16 +24,21 @@ import {
   type ContractEvidenceProvider,
   SourcifyContractAdapter,
   MockLiveContractAdapter,
+  LiveSourcifyContractAdapter,
 } from '../analysis/contract.js';
 import {
   type SimulationAdapter,
+  type LiveRPCSimulationProvider,
   UnavailableSimulationAdapter,
   MockLiveSimulationAdapter,
+  LiveRPCSimulationAdapter,
 } from '../analysis/simulation.js';
 import {
   type IntentProvider,
   ERC7730v2Adapter,
   MockLiveERC7730Adapter,
+  LiveRegistryERC7730Adapter,
+  LOCAL_DESCRIPTOR_FIXTURES,
   resolveStructuredIntent,
   type StructuredIntent,
 } from '../intent/index.js';
@@ -145,18 +150,72 @@ export class EvidencePipeline {
   }
 }
 
+export interface LiveEvidencePipelineOptions {
+  sourcifyApiUrl?: string;
+  rpcUrl?: string;
+  rpcTimeoutMs?: number;
+  registryUrl?: string;
+}
+
 /**
- * Creates an EvidencePipeline configured with live-grade mock evidence adapters.
- * Honestly emits LIVE_EXTERNAL, LIVE_REGISTRY, and LIVE_BACKEND provenance.
+ * Creates an EvidencePipeline configured with live external evidence adapters.
+ * Honestly queries external sources (Sourcify, EVM RPC, ERC-7730 registry).
+ * Enforces strict PRODUCTION policy and fails closed if custom adapters or mock transports are injected.
+ * Requires genuine external connections to achieve VERIFIED; an unconfigured
+ * pipeline returns honest UNAVAILABLE/NONE evidence and never achieves VERIFIED.
  */
-export function createLiveEvidencePipeline(policyEngineOptions: PolicyRuleOptions = {}): EvidencePipeline {
+export function createLiveEvidencePipeline(options: LiveEvidencePipelineOptions = {}): EvidencePipeline {
+  const anyOptions = options as Record<string, unknown>;
+  const forbiddenCustomAdapterKeys = [
+    'contractProvider',
+    'contractAdapter',
+    'simulationAdapter',
+    'intentProvider',
+    'erc7730Adapter',
+    'policyEngine',
+    'policyEngineOptions',
+    'provenanceMode',
+    'requireLiveSimulation',
+    'requireLiveContractVerification',
+    'rpcProvider',
+    'sourcifyFetchFn',
+    'rpcFetchFn',
+    'registryFetchFn',
+    'fetchFn',
+  ];
+
+  for (const key of forbiddenCustomAdapterKeys) {
+    if (key in anyOptions && anyOptions[key] !== undefined) {
+      throw new Error(
+        `createLiveEvidencePipeline rejected custom transport or adapter injection '${key}'. Production pipeline does not accept mock transport injection.`
+      );
+    }
+  }
+
+  const policyOptions: PolicyRuleOptions = {
+    provenanceMode: 'PRODUCTION',
+    requireLiveSimulation: true,
+    requireLiveContractVerification: true,
+  };
+
+  const contractProvider = new LiveSourcifyContractAdapter({
+    apiUrl: options.sourcifyApiUrl,
+  });
+
+  const simulationAdapter = new LiveRPCSimulationAdapter({
+    rpcUrl: options.rpcUrl,
+    timeoutMs: options.rpcTimeoutMs,
+  });
+
+  const intentProvider = new LiveRegistryERC7730Adapter({
+    registryUrl: options.registryUrl,
+  });
+
   return new EvidencePipeline({
-    contractProvider: new MockLiveContractAdapter(),
-    intentProvider: new MockLiveERC7730Adapter(),
-    simulationAdapter: new MockLiveSimulationAdapter(),
-    policyEngine: new DeterministicPolicyEngine({
-      provenanceMode: 'PRODUCTION',
-      ...policyEngineOptions,
-    }),
+    contractProvider,
+    intentProvider,
+    simulationAdapter,
+    policyEngine: new DeterministicPolicyEngine(policyOptions),
   });
 }
+

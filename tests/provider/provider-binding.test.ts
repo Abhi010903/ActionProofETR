@@ -6,19 +6,22 @@ import {
   DeterministicBarrier,
   ActionProofResult,
 } from '../../src/provider/index.js';
-import { EvidencePipeline, createLiveEvidencePipeline } from '../../src/evidence/pipeline.js';
+import { EvidencePipeline, createLiveEvidencePipeline, type LiveEvidencePipelineOptions } from '../../src/evidence/pipeline.js';
+import { computeCommitment, serializeCanonicalToRpcPayload } from '../../src/canonical/index.js';
 import {
   LocalFixtureSimulationAdapter,
   UnavailableSimulationAdapter,
   MockLiveSimulationAdapter,
+  LiveRPCSimulationAdapter,
 } from '../../src/analysis/simulation.js';
-import { MockLiveContractAdapter } from '../../src/analysis/contract.js';
-import { MockLiveERC7730Adapter } from '../../src/intent/erc7730.js';
+import { MockLiveContractAdapter, LiveSourcifyContractAdapter } from '../../src/analysis/contract.js';
+import { MockLiveERC7730Adapter, LiveRegistryERC7730Adapter, LOCAL_DESCRIPTOR_FIXTURES } from '../../src/intent/erc7730.js';
 import {
   KNOWN_SWAP_ABI,
   KNOWN_ERC20_ABI,
 } from '../../src/analysis/decoder.js';
 import type { StructuredIntent } from '../../src/intent/structured.js';
+import type { DecodeEvidence } from '../../src/evidence/types.js';
 
 const USER = '0x04f8996da763b7a969b1028ee3007569eaf3a635' as const;
 const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' as const;
@@ -73,10 +76,97 @@ function createBaseType0Tx(): Record<string, unknown> {
   };
 }
 
+/**
+ * Protocol/adapter test double: verifies adapter processing of external HTTP/RPC responses
+ * in automated integration tests, NOT proof of live service availability.
+ */
+function createProtocolTestPipeline(chainId = 1): EvidencePipeline {
+  return new EvidencePipeline({
+    contractAdapter: new LiveSourcifyContractAdapter({
+      apiUrl: 'https://sourcify.dev/server',
+      fetchFn: async (url: string | URL | Request) => {
+        const urlStr = String(url).toLowerCase();
+        const isUsdc = urlStr.includes(USDC.toLowerCase());
+        const isRouter = urlStr.includes(ROUTER.toLowerCase());
+        if (isUsdc || isRouter) {
+          return new Response(
+            JSON.stringify([
+              {
+                address: isUsdc ? USDC : ROUTER,
+                status: 'perfect',
+                chainIds: [chainId],
+              },
+            ]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        const addrMatch = urlStr.match(/addresses=(0x[a-f0-9]+)/i);
+        const reqAddress = addrMatch ? addrMatch[1] : '0x0';
+        return new Response(JSON.stringify([{ address: reqAddress, status: 'false', chainIds: [chainId] }]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    }),
+    simulationAdapter: new LiveRPCSimulationAdapter({
+      rpcProvider: {
+        request: async ({ method }: { method: string }) => {
+          if (method === 'eth_chainId') return `0x${chainId.toString(16)}`;
+          if (method === 'eth_blockNumber') return '0x13d05fc';
+          if (method === 'eth_call') return '0x0000000000000000000000000000000000000000000000000000000000000001';
+          return '0x0';
+        },
+      },
+    }),
+    erc7730Adapter: new LiveRegistryERC7730Adapter({
+      registryUrl: 'https://registry.erc7730.org',
+      fetchFn: async (url: string | URL | Request) => {
+        const urlStr = String(url).toLowerCase();
+        const chainMatch = urlStr.match(/\/(\d+)\//);
+        const reqChainId = chainMatch ? parseInt(chainMatch[1], 10) : 1;
+        if (urlStr.includes(USDC.toLowerCase())) {
+          const fixture = JSON.parse(JSON.stringify(LOCAL_DESCRIPTOR_FIXTURES[USDC]));
+          for (const k of Object.keys(fixture)) {
+            fixture[k].context.chainId = reqChainId;
+          }
+          return new Response(JSON.stringify(fixture), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (urlStr.includes(ROUTER.toLowerCase())) {
+          const fixture = JSON.parse(JSON.stringify(LOCAL_DESCRIPTOR_FIXTURES[ROUTER]));
+          for (const k of Object.keys(fixture)) {
+            fixture[k].context.chainId = reqChainId;
+          }
+          return new Response(JSON.stringify(fixture), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      },
+    }),
+    provenanceMode: 'PRODUCTION',
+  });
+}
+
+const liveSourcifyTestFetch = async () =>
+  new Response(JSON.stringify([{ address: USDC, status: 'perfect', chainIds: [1] }]), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+const liveRegistryTestFetch = async () =>
+  new Response(JSON.stringify(LOCAL_DESCRIPTOR_FIXTURES[USDC]), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
 describe('Provider Binding Security Specification Tests', () => {
   it('Test 1A: Normal request with live external evidence forwards cleanly with VERIFIED', async () => {
     const wallet = new MockWalletProvider();
-    const pipeline = createLiveEvidencePipeline();
+    const pipeline = createProtocolTestPipeline();
     const proxy = new ActionProofProviderProxy(wallet, {
       declaredAction: DECLARED_TRANSFER,
       evidencePipeline: pipeline,
@@ -1004,7 +1094,7 @@ describe('Provider Binding Security Specification Tests', () => {
 
     it('H4-2: Omitted payload chainId dynamically adopts wallet chainId', async () => {
       const wallet = new MockWalletProvider(10); // Optimism (chain ID 10)
-      const pipeline = createLiveEvidencePipeline();
+      const pipeline = createProtocolTestPipeline(10);
       const proxy = new ActionProofProviderProxy(wallet, {
         declaredAction: DECLARED_TRANSFER,
         evidencePipeline: pipeline,
@@ -1028,7 +1118,7 @@ describe('Provider Binding Security Specification Tests', () => {
 
     it('H4-3: Concurrent wallet chain change before pre-forward recheck BLOCKS forwarding', async () => {
       const wallet = new MockWalletProvider(1);
-      const pipeline = createLiveEvidencePipeline();
+      const pipeline = createProtocolTestPipeline();
       const proxy = new ActionProofProviderProxy(wallet, {
         declaredAction: DECLARED_TRANSFER,
         evidencePipeline: pipeline,
@@ -1052,7 +1142,7 @@ describe('Provider Binding Security Specification Tests', () => {
 
     it('H4-4: Matching payload chainId and wallet chainId succeeds normally', async () => {
       const wallet = new MockWalletProvider(1);
-      const pipeline = createLiveEvidencePipeline();
+      const pipeline = createProtocolTestPipeline();
       const proxy = new ActionProofProviderProxy(wallet, {
         declaredAction: DECLARED_TRANSFER,
         evidencePipeline: pipeline,
@@ -1073,7 +1163,7 @@ describe('Provider Binding Security Specification Tests', () => {
   describe('M2: Canonical RPC Forwarding Specification', () => {
     it('M2-5: Wallet mock receives the exact canonical payload, NOT the raw snapshot or liveRequest', async () => {
       const wallet = new MockWalletProvider(1);
-      const pipeline = createLiveEvidencePipeline();
+      const pipeline = createProtocolTestPipeline();
       const proxy = new ActionProofProviderProxy(wallet, {
         declaredAction: DECLARED_TRANSFER,
         evidencePipeline: pipeline,
@@ -1102,7 +1192,7 @@ describe('Provider Binding Security Specification Tests', () => {
 
     it('M2-6: Normalizes mixed-case addresses in forwarded payload', async () => {
       const wallet = new MockWalletProvider(1);
-      const pipeline = createLiveEvidencePipeline();
+      const pipeline = createProtocolTestPipeline();
       const proxy = new ActionProofProviderProxy(wallet, {
         declaredAction: DECLARED_TRANSFER,
         evidencePipeline: pipeline,
@@ -1411,7 +1501,7 @@ describe('Provider Binding Security Specification Tests', () => {
 
     it('M3-11: Post-verification mutation of proxy declaredAction does not alter in-flight request verification snapshot', async () => {
       const wallet = new MockWalletProvider(1);
-      const pipeline = createLiveEvidencePipeline();
+      const pipeline = createProtocolTestPipeline();
       const proxy = new ActionProofProviderProxy(wallet, {
         declaredAction: DECLARED_TRANSFER,
         evidencePipeline: pipeline,
@@ -1440,7 +1530,7 @@ describe('Provider Binding Security Specification Tests', () => {
 
     it('M3-12: Normal supported swap remains VERIFIED and forwards canonical payload', async () => {
       const wallet = new MockWalletProvider(1);
-      const pipeline = createLiveEvidencePipeline();
+      const pipeline = createProtocolTestPipeline();
       const proxy = new ActionProofProviderProxy(wallet, {
         declaredAction: 'Swap 100 USDC -> ETH',
         evidencePipeline: pipeline,
@@ -1617,8 +1707,20 @@ describe('Provider Binding Security Specification Tests', () => {
     it('M4-3: LOCAL_FIXTURE contract identity: live simulation + live intent, but contract is LOCAL_FIXTURE -> degraded to WARNING', async () => {
       const wallet = new MockWalletProvider(1);
       const pipeline = new EvidencePipeline({
-        simulationAdapter: new MockLiveSimulationAdapter(),
-        erc7730Adapter: new MockLiveERC7730Adapter(),
+        simulationAdapter: new LiveRPCSimulationAdapter({
+          rpcProvider: {
+            request: async ({ method }: { method: string }) => {
+              if (method === 'eth_chainId') return '0x1';
+              if (method === 'eth_blockNumber') return '0x13d05fc';
+              if (method === 'eth_call') return '0x0000000000000000000000000000000000000000000000000000000000000001';
+              return '0x0';
+            },
+          },
+        }),
+        erc7730Adapter: new LiveRegistryERC7730Adapter({
+          registryUrl: 'https://registry.erc7730.org',
+          fetchFn: liveRegistryTestFetch,
+        }),
         // contractAdapter defaults to LocalFixtureContractAdapter (LOCAL_FIXTURE)
         provenanceMode: 'PRODUCTION',
       });
@@ -1645,8 +1747,20 @@ describe('Provider Binding Security Specification Tests', () => {
     it('M4-4: LOCAL_FIXTURE ERC-7730 descriptor: live simulation + live contract, but intent is LOCAL_FIXTURE -> degraded to WARNING', async () => {
       const wallet = new MockWalletProvider(1);
       const pipeline = new EvidencePipeline({
-        contractAdapter: new MockLiveContractAdapter(),
-        simulationAdapter: new MockLiveSimulationAdapter(),
+        contractAdapter: new LiveSourcifyContractAdapter({
+          apiUrl: 'https://sourcify.dev/server',
+          fetchFn: liveSourcifyTestFetch,
+        }),
+        simulationAdapter: new LiveRPCSimulationAdapter({
+          rpcProvider: {
+            request: async ({ method }: { method: string }) => {
+              if (method === 'eth_chainId') return '0x1';
+              if (method === 'eth_blockNumber') return '0x13d05fc';
+              if (method === 'eth_call') return '0x0000000000000000000000000000000000000000000000000000000000000001';
+              return '0x0';
+            },
+          },
+        }),
         // erc7730Adapter defaults to ERC7730v2Adapter with local fixtures
         provenanceMode: 'PRODUCTION',
       });
@@ -1673,8 +1787,14 @@ describe('Provider Binding Security Specification Tests', () => {
     it('M4-5: LOCAL_FIXTURE simulation: live contract + live intent, but simulation is LocalFixtureSimulationAdapter -> degraded to WARNING', async () => {
       const wallet = new MockWalletProvider(1);
       const pipeline = new EvidencePipeline({
-        contractAdapter: new MockLiveContractAdapter(),
-        erc7730Adapter: new MockLiveERC7730Adapter(),
+        contractAdapter: new LiveSourcifyContractAdapter({
+          apiUrl: 'https://sourcify.dev/server',
+          fetchFn: liveSourcifyTestFetch,
+        }),
+        erc7730Adapter: new LiveRegistryERC7730Adapter({
+          registryUrl: 'https://registry.erc7730.org',
+          fetchFn: liveRegistryTestFetch,
+        }),
         simulationAdapter: new LocalFixtureSimulationAdapter(),
         provenanceMode: 'PRODUCTION',
       });
@@ -1701,8 +1821,14 @@ describe('Provider Binding Security Specification Tests', () => {
     it('M4-6: Mixed provenance: contract = LIVE_EXTERNAL, intent = LIVE_REGISTRY, simulation = LOCAL_FIXTURE -> WARNING, not VERIFIED', async () => {
       const wallet = new MockWalletProvider(1);
       const pipeline = new EvidencePipeline({
-        contractAdapter: new MockLiveContractAdapter(),
-        erc7730Adapter: new MockLiveERC7730Adapter(),
+        contractAdapter: new LiveSourcifyContractAdapter({
+          apiUrl: 'https://sourcify.dev/server',
+          fetchFn: liveSourcifyTestFetch,
+        }),
+        erc7730Adapter: new LiveRegistryERC7730Adapter({
+          registryUrl: 'https://registry.erc7730.org',
+          fetchFn: liveRegistryTestFetch,
+        }),
         simulationAdapter: new LocalFixtureSimulationAdapter(),
         provenanceMode: 'PRODUCTION',
       });
@@ -1721,13 +1847,20 @@ describe('Provider Binding Security Specification Tests', () => {
       expect(result.verdict).toBe('WARNING');
       expect(result.verdict).not.toBe('VERIFIED');
       expect(result.blockedBeforeForwarding).toBe(true);
+      expect(wallet.received.length).toBe(0);
     });
 
     it('M4-7: UNAVAILABLE evidence: missing required evidence source (simulation UNAVAILABLE) degrades to WARNING', async () => {
       const wallet = new MockWalletProvider(1);
       const pipeline = new EvidencePipeline({
-        contractAdapter: new MockLiveContractAdapter(),
-        erc7730Adapter: new MockLiveERC7730Adapter(),
+        contractAdapter: new LiveSourcifyContractAdapter({
+          apiUrl: 'https://sourcify.dev/server',
+          fetchFn: liveSourcifyTestFetch,
+        }),
+        erc7730Adapter: new LiveRegistryERC7730Adapter({
+          registryUrl: 'https://registry.erc7730.org',
+          fetchFn: liveRegistryTestFetch,
+        }),
         simulationAdapter: new UnavailableSimulationAdapter('EVM RPC endpoint offline'),
         provenanceMode: 'PRODUCTION',
       });
@@ -1747,11 +1880,12 @@ describe('Provider Binding Security Specification Tests', () => {
       expect(result.evidence?.simulation.status).toBe('UNAVAILABLE');
       expect(result.evidence?.policy.warnings.some(w => w.includes('Simulation evidence unavailable'))).toBe(true);
       expect(result.blockedBeforeForwarding).toBe(true);
+      expect(wallet.received.length).toBe(0);
     });
 
     it('M4-8: Acceptable live external evidence for all checks -> VERIFIED', async () => {
       const wallet = new MockWalletProvider(1);
-      const pipeline = createLiveEvidencePipeline();
+      const pipeline = createProtocolTestPipeline();
       const proxy = new ActionProofProviderProxy(wallet, {
         declaredAction: DECLARED_TRANSFER,
         evidencePipeline: pipeline,
@@ -1898,4 +2032,1088 @@ describe('Provider Binding Security Specification Tests', () => {
       expect(wallet.received.length).toBe(0);
     });
   });
+
+  describe('H1: Provenance Integrity Specification & Regression Tests', () => {
+    it('H1-1: MockLiveContractAdapter honestly emits LOCAL_FIXTURE provenance, never manufactures LIVE_EXTERNAL', async () => {
+      const adapter = new MockLiveContractAdapter();
+      const verified = await adapter.getContractEvidence(USDC, 1);
+      expect(verified.status).toBe('VERIFIED_CORRESPONDENCE');
+      expect(verified.provenance).toBe('LOCAL_FIXTURE');
+      expect(verified.provenance).not.toBe('LIVE_EXTERNAL');
+      expect(verified.sourceDescription).toMatch(/mock fixture/i);
+
+      const unverified = await adapter.getContractEvidence(ATTACKER, 1);
+      expect(unverified.status).toBe('UNVERIFIED');
+      expect(unverified.provenance).toBe('NONE');
+      expect(unverified.provenance).not.toBe('LIVE_EXTERNAL');
+    });
+
+    it('H1-2: MockLiveSimulationAdapter honestly emits LOCAL_FIXTURE and FIXTURE_SIMULATION, never manufactures LIVE_BACKEND or LIVE_SIMULATED', async () => {
+      const adapter = new MockLiveSimulationAdapter();
+      const tx = {
+        domain: 'actionproof.request.v1' as const,
+        type: '0x2' as const,
+        from: USER,
+        to: USDC,
+        value: '0x0' as const,
+        data: DATA_TRANSFER,
+        chainId: 1,
+        nonce: null,
+        gas: null,
+        gasPrice: null,
+        maxFeePerGas: null,
+        maxPriorityFeePerGas: null,
+        accessList: [],
+      };
+
+      const result = await adapter.simulate(tx);
+      expect(result.status).toBe('FIXTURE_SIMULATION');
+      expect(result.status).not.toBe('LIVE_SIMULATED');
+      expect(result.provenance).toBe('LOCAL_FIXTURE');
+      expect(result.provenance).not.toBe('LIVE_BACKEND');
+    });
+
+    it('H1-3: MockLiveERC7730Adapter honestly emits LOCAL_FIXTURE provenance, never manufactures LIVE_REGISTRY', async () => {
+      const adapter = new MockLiveERC7730Adapter();
+      const mockDecode = {
+        status: 'DECODED' as const,
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '100000000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      };
+
+      const result = await adapter.resolveIntent(USDC, 1, DATA_TRANSFER, mockDecode);
+      expect(result.status).toBe('DESCRIPTOR_FOUND');
+      expect(result.provenance).toBe('LOCAL_FIXTURE');
+      expect(result.provenance).not.toBe('LIVE_REGISTRY');
+    });
+
+    it('H1-4: EvidencePipeline with MockLive adapters in PRODUCTION mode produces WARNING, never security-grade VERIFIED', async () => {
+      const pipeline = new EvidencePipeline({
+        contractAdapter: new MockLiveContractAdapter(),
+        simulationAdapter: new MockLiveSimulationAdapter(),
+        erc7730Adapter: new MockLiveERC7730Adapter(),
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const liveTx = createBaseType2Tx();
+      const commitment = computeCommitment(liveTx);
+
+      const evidence = await pipeline.runPipeline(commitment.canonical, commitment, DECLARED_TRANSFER);
+      expect(evidence.policy.verdict).toBe('WARNING');
+      expect(evidence.policy.verdict).not.toBe('VERIFIED');
+      expect(evidence.contract.provenance).toBe('LOCAL_FIXTURE');
+      expect(evidence.simulation.provenance).toBe('LOCAL_FIXTURE');
+      expect(evidence.intent.provenance).toBe('LOCAL_FIXTURE');
+      expect(evidence.policy.warnings.some(w => /local fixture/i.test(w))).toBe(true);
+      expect(evidence.policy.rulesEvaluated.some(r => r.ruleId === 'RULE_10_EVIDENCE_PROVENANCE_INTEGRITY' && !r.passed)).toBe(true);
+    });
+
+    it('H1-5: ActionProofProviderProxy with MockLive adapters in PRODUCTION mode halts fail-closed before the wallet', async () => {
+      const wallet = new MockWalletProvider(1);
+      const pipeline = new EvidencePipeline({
+        contractAdapter: new MockLiveContractAdapter(),
+        simulationAdapter: new MockLiveSimulationAdapter(),
+        erc7730Adapter: new MockLiveERC7730Adapter(),
+        provenanceMode: 'PRODUCTION',
+      });
+      const proxy = new ActionProofProviderProxy(wallet, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: pipeline,
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const liveTx = createBaseType2Tx();
+      const result = (await proxy.request({
+        method: 'eth_sendTransaction',
+        params: [liveTx],
+      })) as ActionProofResult;
+
+      expect(result.verdict).toBe('WARNING');
+      expect(result.verdict).not.toBe('VERIFIED');
+      expect(result.blockedBeforeForwarding).toBe(true);
+      expect(result.forwardingStatus).toBe('HALTED_AWAITING_CONFIRMATION');
+      expect(result.forwardingDetail).toBe('UNCONFIRMED_WARNING_HALT');
+      expect(wallet.received.length).toBe(0);
+    });
+
+    it('H1-6: ActionProofProviderProxy with MockLive adapters in DEMO mode produces DEMO_VERIFIED (distinct from VERIFIED) and forwards', async () => {
+      const wallet = new MockWalletProvider(1);
+      const pipeline = new EvidencePipeline({
+        contractAdapter: new MockLiveContractAdapter(),
+        simulationAdapter: new MockLiveSimulationAdapter(),
+        erc7730Adapter: new MockLiveERC7730Adapter(),
+        provenanceMode: 'DEMO',
+      });
+      const proxy = new ActionProofProviderProxy(wallet, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: pipeline,
+        provenanceMode: 'DEMO',
+      });
+
+      const liveTx = createBaseType2Tx();
+      const result = (await proxy.request({
+        method: 'eth_sendTransaction',
+        params: [liveTx],
+      })) as ActionProofResult;
+
+      expect(result.verdict).toBe('DEMO_VERIFIED');
+      expect(result.verdict).not.toBe('VERIFIED');
+      expect(result.blockedBeforeForwarding).toBe(false);
+      expect(result.forwardingStatus).toBe('FORWARDED');
+      expect(result.forwardingDetail).toBe('DEMO_VERIFIED_FORWARD');
+      expect(wallet.received.length).toBe(1);
+      const expectedRpcPayload = serializeCanonicalToRpcPayload(computeCommitment(liveTx).canonical);
+      expect(wallet.received[0]).toEqual(expectedRpcPayload);
+    });
+
+    it('H1-7: Unconfigured LiveRPCSimulationAdapter honestly reports UNAVAILABLE and degrades to WARNING in production', async () => {
+      const unconfiguredAdapter = new LiveRPCSimulationAdapter({});
+      const tx = {
+        domain: 'actionproof.request.v1' as const,
+        type: '0x2' as const,
+        from: USER,
+        to: USDC,
+        value: '0x0' as const,
+        data: DATA_TRANSFER,
+        chainId: 1,
+        nonce: null,
+        gas: null,
+        gasPrice: null,
+        maxFeePerGas: null,
+        maxPriorityFeePerGas: null,
+        accessList: [],
+      };
+
+      const result = await unconfiguredAdapter.simulate(tx);
+      expect(result.status).toBe('UNAVAILABLE');
+      expect(result.provenance).toBe('NONE');
+      expect(result.provenance).not.toBe('LIVE_BACKEND');
+
+      const wallet = new MockWalletProvider(1);
+      const pipeline = new EvidencePipeline({
+        contractAdapter: new LiveSourcifyContractAdapter({ apiUrl: 'https://sourcify.dev/server', fetchFn: liveSourcifyTestFetch }),
+        simulationAdapter: unconfiguredAdapter,
+        erc7730Adapter: new LiveRegistryERC7730Adapter({ registryUrl: 'https://registry.erc7730.org', fetchFn: liveRegistryTestFetch }),
+        provenanceMode: 'PRODUCTION',
+      });
+      const proxy = new ActionProofProviderProxy(wallet, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: pipeline,
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const liveTx = createBaseType2Tx();
+      const actionResult = (await proxy.request({
+        method: 'eth_sendTransaction',
+        params: [liveTx],
+      })) as ActionProofResult;
+
+      expect(actionResult.verdict).toBe('WARNING');
+      expect(actionResult.blockedBeforeForwarding).toBe(true);
+      expect(wallet.received.length).toBe(0);
+    });
+
+    it('H1-8: Level-2 binding behavior remains intact: pre-forward mutation is blocked and valid live request forwards', async () => {
+      // 1. Pre-forward mutation path is blocked: no transaction dispatched
+      const walletTampered = new MockWalletProvider(1);
+      const pipelineTampered = createProtocolTestPipeline();
+      const proxyTampered = new ActionProofProviderProxy(walletTampered, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: pipelineTampered,
+        barrier: async (tx) => {
+          tx.value = '0x1000'; // Tamper during synchronization barrier hook
+        },
+      });
+
+      const liveTxTampered = createBaseType2Tx();
+      const resultTampered = (await proxyTampered.request({
+        method: 'eth_sendTransaction',
+        params: [liveTxTampered],
+      })) as ActionProofResult;
+
+      expect(resultTampered.verdict).toBe('BLOCKED');
+      expect(resultTampered.reason).toBe('COMMITMENT_MISMATCH');
+      expect(resultTampered.blockedBeforeForwarding).toBe(true);
+      expect(walletTampered.received.length).toBe(0);
+
+      // 2. Valid live request without tampering forwards and wallet receives exact canonical payload
+      const walletValid = new MockWalletProvider(1);
+      const pipelineValid = createProtocolTestPipeline();
+      const proxyValid = new ActionProofProviderProxy(walletValid, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: pipelineValid,
+      });
+
+      const liveTxValid = createBaseType2Tx();
+      const resultValid = (await proxyValid.request({
+        method: 'eth_sendTransaction',
+        params: [liveTxValid],
+      })) as ActionProofResult;
+
+      expect(resultValid.verdict).toBe('VERIFIED');
+      expect(resultValid.blockedBeforeForwarding).toBe(false);
+      expect(resultValid.forwardingStatus).toBe('FORWARDED');
+      expect(walletValid.received.length).toBe(1);
+      const expectedRpcPayload = serializeCanonicalToRpcPayload(computeCommitment(liveTxValid).canonical);
+      expect(walletValid.received[0]).toEqual(expectedRpcPayload);
+    });
+
+    it('H1-9: Fake provider returning non-hex or malformed response fails closed to UNAVAILABLE/NONE without claiming LIVE_BACKEND', async () => {
+      const malformedAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: {
+          request: async () => ({ status: 'ok', somethingElse: true }),
+        },
+      });
+
+      const liveTx = createBaseType2Tx();
+      const commitment = computeCommitment(liveTx);
+      const res = await malformedAdapter.simulate(commitment.canonical);
+
+      expect(res.status).toBe('UNAVAILABLE');
+      expect(res.provenance).toBe('NONE');
+      expect(res.provenance).not.toBe('LIVE_BACKEND');
+      expect(res.success).toBe(false);
+      expect(res.blockNumber).toBeNull();
+      expect(res.stateContext).toBeNull();
+      expect(res.gasUsed).toBeNull();
+      expect(res.assetChanges).toEqual([]);
+      expect(res.revertReason).toMatch(/Malformed RPC response/i);
+    });
+
+    it('H1-10: Fake provider returning network/RPC error fails closed to UNAVAILABLE/NONE and never fabricates block number or success', async () => {
+      const errorAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: {
+          request: async ({ method }) => {
+            if (method === 'eth_blockNumber') throw new Error('connect ECONNREFUSED 127.0.0.1:8545');
+            throw new Error('RPC Method error: Internal server error (code -32603)');
+          },
+        },
+      });
+
+      const liveTx = createBaseType2Tx();
+      const commitment = computeCommitment(liveTx);
+      const res = await errorAdapter.simulate(commitment.canonical);
+
+      expect(res.status).toBe('UNAVAILABLE');
+      expect(res.provenance).toBe('NONE');
+      expect(res.provenance).not.toBe('LIVE_BACKEND');
+      expect(res.success).toBe(false);
+      expect(res.blockNumber).toBeNull();
+      expect(res.stateContext).toBeNull();
+      expect(res.gasUsed).toBeNull();
+      expect(res.assetChanges).toEqual([]);
+      expect(res.revertReason).toMatch(/RPC simulation call failed/i);
+    });
+
+    it('H1-11: Merely configuring an rpcUrl is not evidence of success; network failure fails closed to UNAVAILABLE/NONE', async () => {
+      const unreachableUrlAdapter = new LiveRPCSimulationAdapter({
+        rpcUrl: 'http://127.0.0.1:59999/unreachable-rpc-endpoint',
+        fetchFn: async () => {
+          throw new Error('fetch failed: ECONNREFUSED');
+        },
+      });
+
+      const liveTx = createBaseType2Tx();
+      const commitment = computeCommitment(liveTx);
+      const res = await unreachableUrlAdapter.simulate(commitment.canonical);
+
+      expect(res.status).toBe('UNAVAILABLE');
+      expect(res.provenance).toBe('NONE');
+      expect(res.provenance).not.toBe('LIVE_BACKEND');
+      expect(res.success).toBe(false);
+      expect(res.revertReason).toMatch(/ECONNREFUSED/i);
+    });
+
+    it('H1-12: Confirmed EVM revert from RPC returns REVERTED with LIVE_BACKEND provenance, without fabricated gas or asset movements', async () => {
+      const revertAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: {
+          request: async ({ method }) => {
+            if (method === 'eth_chainId') return '0x1';
+            if (method === 'eth_blockNumber') return '0x13d05fc';
+            if (method === 'eth_call') {
+              const err = new Error('execution reverted: ERC20: transfer amount exceeds balance');
+              (err as unknown as { data: string }).data = '0x08c379a0';
+              throw err;
+            }
+            throw new Error(`Unhandled method: ${method}`);
+          },
+        },
+      });
+
+      const liveTx = createBaseType2Tx();
+      const commitment = computeCommitment(liveTx);
+      const res = await revertAdapter.simulate(commitment.canonical);
+
+      expect(res.status).toBe('REVERTED');
+      expect(res.provenance).toBe('LIVE_BACKEND');
+      expect(res.success).toBe(false);
+      expect(res.blockNumber).toBe(20776444);
+      expect(res.gasUsed).toBeNull();
+      expect(res.stateContext).toBeNull();
+      expect(res.assetChanges).toEqual([]);
+      expect(res.revertReason).toMatch(/execution reverted/i);
+
+      // Feeding into proxy halts with BLOCKED
+      const wallet = new MockWalletProvider(1);
+      const pipeline = new EvidencePipeline({
+        contractAdapter: new LiveSourcifyContractAdapter({ apiUrl: 'https://sourcify.dev/server', fetchFn: liveSourcifyTestFetch }),
+        simulationAdapter: revertAdapter,
+        erc7730Adapter: new LiveRegistryERC7730Adapter({ registryUrl: 'https://registry.erc7730.org', fetchFn: liveRegistryTestFetch }),
+        provenanceMode: 'PRODUCTION',
+      });
+      const proxy = new ActionProofProviderProxy(wallet, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: pipeline,
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const actionResult = (await proxy.request({
+        method: 'eth_sendTransaction',
+        params: [liveTx],
+      })) as ActionProofResult;
+
+      expect(actionResult.verdict).toBe('BLOCKED');
+      expect(actionResult.blockedBeforeForwarding).toBe(true);
+      expect(wallet.received.length).toBe(0);
+    });
+
+    it('H1-13: Successful eth_call handling using test double executes with canonical fields and emits LIVE_BACKEND without fabricated facts', async () => {
+      const callsReceived: Array<{ method: string; params: unknown[] }> = [];
+      const testDoubleProvider = {
+        request: async ({ method, params }: { method: string; params?: unknown[] }) => {
+          callsReceived.push({ method, params: params ?? [] });
+          if (method === 'eth_chainId') return '0x1';
+          if (method === 'eth_blockNumber') return '0x13d05fc';
+          if (method === 'eth_call') return '0x0000000000000000000000000000000000000000000000000000000000000001';
+          throw new Error(`Unsupported method ${method}`);
+        },
+      };
+
+      const liveAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: testDoubleProvider,
+      });
+
+      const liveTx = createBaseType2Tx();
+      const commitment = computeCommitment(liveTx);
+      const res = await liveAdapter.simulate(commitment.canonical);
+
+      // Verify eth_call was executed with exact canonical fields
+      expect(callsReceived.length).toBe(3);
+      expect(callsReceived[0].method).toBe('eth_blockNumber');
+      expect(callsReceived[1].method).toBe('eth_chainId');
+      expect(callsReceived[2].method).toBe('eth_call');
+
+      const ethCallParams = callsReceived[2].params as [Record<string, unknown>, string];
+      expect(ethCallParams[0].from).toBe(USER);
+      expect(ethCallParams[0].to).toBe(USDC);
+      expect(ethCallParams[0].data).toBe(DATA_TRANSFER);
+      expect(ethCallParams[0].value).toBe('0x0');
+      expect(ethCallParams[1]).toBe('0x13d05fc');
+
+      // Verify honest evidence model: NO fabricated gasUsed, NO fabricated stateContext, NO fabricated assetChanges
+      expect(res.status).toBe('LIVE_SIMULATED');
+      expect(res.provenance).toBe('LIVE_BACKEND');
+      expect(res.success).toBe(true);
+      expect(res.blockNumber).toBe(20776444);
+      expect(res.stateContext).toBeNull();
+      expect(res.gasUsed).toBeNull();
+      expect(res.assetChanges).toEqual([]);
+      expect(res.revertReason).toBeNull();
+    });
+  });
+
+  describe('H1 Final Remediation: Adversarial Provenance Tests', () => {
+    it('D-1: A known fixture address cannot receive LIVE_EXTERNAL from LiveSourcifyContractAdapter without real HTTP response', async () => {
+      // 1. Unconfigured adapter on known fixture address
+      const unconfiguredAdapter = new LiveSourcifyContractAdapter();
+      const res1 = await unconfiguredAdapter.getContractEvidence(USDC, 1);
+      expect(res1.status).toBe('UNAVAILABLE');
+      expect(res1.provenance).toBe('NONE');
+      expect(res1.provenance).not.toBe('LIVE_EXTERNAL');
+
+      // 2. Adapter with localFixtures configured emits LOCAL_FIXTURE, never LIVE_EXTERNAL
+      const localAdapter = new LiveSourcifyContractAdapter({
+        localFixtures: {
+          [USDC]: { name: 'FiatTokenV2_2', compiler: '0.6.12', matchType: 'FULL_MATCH', decimals: 6 },
+        },
+      });
+      const res2 = await localAdapter.getContractEvidence(USDC, 1);
+      expect(res2.status).toBe('VERIFIED_CORRESPONDENCE');
+      expect(res2.provenance).toBe('LOCAL_FIXTURE');
+      expect(res2.provenance).not.toBe('LIVE_EXTERNAL');
+    });
+
+    it('D-2: Local descriptor maps cannot receive LIVE_REGISTRY from LiveRegistryERC7730Adapter', async () => {
+      const localAdapter = new LiveRegistryERC7730Adapter({
+        localDescriptors: LOCAL_DESCRIPTOR_FIXTURES,
+      });
+
+      const mockDecode: DecodeEvidence = {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      };
+
+      const intent = await localAdapter.resolveIntent(USDC, 1, '0xa9059cbb', mockDecode);
+      expect(intent.status).toBe('DESCRIPTOR_FOUND');
+      expect(intent.provenance).toBe('LOCAL_FIXTURE');
+      expect(intent.provenance).not.toBe('LIVE_REGISTRY');
+    });
+
+    it('D-3: createLiveEvidencePipeline() without genuine external connections cannot produce production VERIFIED or forward as VERIFIED', async () => {
+      const unconfiguredPipeline = createLiveEvidencePipeline();
+      const wallet = new MockWalletProvider(1);
+      const proxy = new ActionProofProviderProxy(wallet, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: unconfiguredPipeline,
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const liveTx = createBaseType2Tx();
+      const result = (await proxy.request({
+        method: 'eth_sendTransaction',
+        params: [liveTx],
+      })) as ActionProofResult;
+
+      expect(result.verdict).toBe('WARNING');
+      expect(result.verdict).not.toBe('VERIFIED');
+      expect(result.blockedBeforeForwarding).toBe(true);
+      expect(result.forwardingStatus).toBe('HALTED_AWAITING_CONFIRMATION');
+      expect(wallet.received.length).toBe(0);
+
+      // Verify that all evidence sources honestly reported UNAVAILABLE and NONE provenance
+      expect(result.evidence?.contract.status).toBe('UNAVAILABLE');
+      expect(result.evidence?.contract.provenance).toBe('NONE');
+      expect(result.evidence?.simulation.status).toBe('UNAVAILABLE');
+      expect(result.evidence?.simulation.provenance).toBe('NONE');
+      expect(result.evidence?.intent.status).toBe('UNAVAILABLE');
+      expect(result.evidence?.intent.provenance).toBe('NONE');
+    });
+
+    it('D-4: RPC test doubles and mocked fetch responses are clearly test-scoped and cannot be mistaken for production evidence', async () => {
+      const protocolPipeline = createProtocolTestPipeline();
+      expect(protocolPipeline).toBeInstanceOf(EvidencePipeline);
+      // An unconfigured pipeline without test doubles produces WARNING
+      const productionPipeline = createLiveEvidencePipeline();
+      const evidence = await productionPipeline.runPipeline(
+        computeCommitment(createBaseType2Tx()).canonical,
+        computeCommitment(createBaseType2Tx()),
+        DECLARED_TRANSFER
+      );
+      expect(evidence.policy.verdict).toBe('WARNING');
+      expect(evidence.policy.verdict).not.toBe('VERIFIED');
+    });
+
+    it('D-5: Mixed provenance continues to fail closed in production', async () => {
+      const wallet = new MockWalletProvider(1);
+      const pipeline = new EvidencePipeline({
+        contractAdapter: new LiveSourcifyContractAdapter({
+          apiUrl: 'https://sourcify.dev/server',
+          fetchFn: liveSourcifyTestFetch,
+        }),
+        simulationAdapter: new LocalFixtureSimulationAdapter(), // LOCAL_FIXTURE
+        erc7730Adapter: new LiveRegistryERC7730Adapter({
+          registryUrl: 'https://registry.erc7730.org',
+          fetchFn: liveRegistryTestFetch,
+        }),
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const proxy = new ActionProofProviderProxy(wallet, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: pipeline,
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const liveTx = createBaseType2Tx();
+      const result = (await proxy.request({
+        method: 'eth_sendTransaction',
+        params: [liveTx],
+      })) as ActionProofResult;
+
+      expect(result.verdict).toBe('WARNING');
+      expect(result.verdict).not.toBe('VERIFIED');
+      expect(result.blockedBeforeForwarding).toBe(true);
+      expect(wallet.received.length).toBe(0);
+    });
+
+    it('D-6: Genuine external-response paths validate response contents before assigning live provenance', async () => {
+      // 1. Sourcify returning unverified status: 'false'
+      const sourcifyUnverified = new LiveSourcifyContractAdapter({
+        apiUrl: 'https://sourcify.dev/server',
+        fetchFn: async () =>
+          new Response(JSON.stringify([{ address: ATTACKER, status: 'false' }]), { status: 200 }),
+      });
+      const contractRes = await sourcifyUnverified.getContractEvidence(ATTACKER, 1);
+      expect(contractRes.status).toBe('UNVERIFIED');
+      expect(contractRes.provenance).toBe('LIVE_EXTERNAL');
+      expect(contractRes.matchType).toBe('NONE');
+
+      // 2. Sourcify returning invalid non-array JSON
+      const sourcifyMalformed = new LiveSourcifyContractAdapter({
+        apiUrl: 'https://sourcify.dev/server',
+        fetchFn: async () => new Response(JSON.stringify({ error: 'not an array' }), { status: 200 }),
+      });
+      const malformedRes = await sourcifyMalformed.getContractEvidence(USDC, 1);
+      expect(malformedRes.status).toBe('UNAVAILABLE');
+      expect(malformedRes.provenance).toBe('NONE');
+
+      // 3. Registry returning 404
+      const registry404 = new LiveRegistryERC7730Adapter({
+        registryUrl: 'https://registry.erc7730.org',
+        fetchFn: async () => new Response('Not found', { status: 404 }),
+      });
+      const intent404 = await registry404.resolveIntent(USDC, 1, '0xa9059cbb', {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      });
+      expect(intent404.status).toBe('DESCRIPTOR_ABSENT');
+      expect(intent404.provenance).toBe('LIVE_REGISTRY');
+
+      // 4. Registry returning malformed schema
+      const registryMalformed = new LiveRegistryERC7730Adapter({
+        registryUrl: 'https://registry.erc7730.org',
+        fetchFn: async () => new Response(JSON.stringify({ invalid: true }), { status: 200 }),
+      });
+      const intentMalformed = await registryMalformed.resolveIntent(USDC, 1, '0xa9059cbb', {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      });
+      expect(intentMalformed.status).toBe('DESCRIPTOR_ABSENT');
+      expect(intentMalformed.provenance).toBe('LIVE_REGISTRY');
+
+      // 5. Registry returning descriptor with mismatched chainId
+      const registryWrongChain = new LiveRegistryERC7730Adapter({
+        registryUrl: 'https://registry.erc7730.org',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              schemaVersion: '2.0.0',
+              id: 'test.descriptor',
+              functionName: 'transfer',
+              context: { contract: 'USDC', chainId: 137, address: USDC }, // polygon instead of mainnet 1
+              expectedFields: ['to', 'amount'],
+              display: { formats: { intent: 'Transfer' } },
+            }),
+            { status: 200 }
+          ),
+      });
+      const intentWrongChain = await registryWrongChain.resolveIntent(USDC, 1, '0xa9059cbb', {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      });
+      expect(intentWrongChain.status).toBe('DESCRIPTOR_ABSENT');
+      expect(intentWrongChain.provenance).toBe('LIVE_REGISTRY');
+
+      // 6. Registry returning descriptor with unsupported schemaVersion
+      const registryOldVersion = new LiveRegistryERC7730Adapter({
+        registryUrl: 'https://registry.erc7730.org',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              schemaVersion: '1.0.0', // invalid schema version
+              id: 'test.descriptor',
+              functionName: 'transfer',
+              context: { contract: 'USDC', chainId: 1, address: USDC },
+              expectedFields: ['to', 'amount'],
+              display: { formats: { intent: 'Transfer' } },
+            }),
+            { status: 200 }
+          ),
+      });
+      const intentOldVersion = await registryOldVersion.resolveIntent(USDC, 1, '0xa9059cbb', {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      });
+      expect(intentOldVersion.status).toBe('DESCRIPTOR_ABSENT');
+      expect(intentOldVersion.provenance).toBe('LIVE_REGISTRY');
+
+      // 7. Registry returning top-level descriptor with mismatched functionName
+      const registryWrongFunction = new LiveRegistryERC7730Adapter({
+        registryUrl: 'https://registry.erc7730.org',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              schemaVersion: '2.0.0',
+              id: 'test.descriptor',
+              functionName: 'approve', // wrong function!
+              context: { contract: 'USDC', chainId: 1, address: USDC },
+              expectedFields: ['to', 'amount'],
+              display: { formats: { intent: 'Approve' } },
+            }),
+            { status: 200 }
+          ),
+      });
+      const intentWrongFunction = await registryWrongFunction.resolveIntent(USDC, 1, '0xa9059cbb', {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      });
+      expect(intentWrongFunction.status).toBe('DESCRIPTOR_ABSENT');
+      expect(intentWrongFunction.provenance).toBe('LIVE_REGISTRY');
+
+      // 8. Registry returning valid top-level descriptor with matching functionName and address
+      const registryValidTopLevel = new LiveRegistryERC7730Adapter({
+        registryUrl: 'https://registry.erc7730.org',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              schemaVersion: '2.0.0',
+              id: 'test.descriptor',
+              functionName: 'transfer', // matching function
+              context: { contract: 'USDC', chainId: 1, address: USDC },
+              expectedFields: ['to', 'amount'],
+              display: { formats: { intent: 'Transfer {amount} to {to}' } },
+            }),
+            { status: 200 }
+          ),
+      });
+      const intentValidTopLevel = await registryValidTopLevel.resolveIntent(USDC, 1, '0xa9059cbb', {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      });
+      expect(intentValidTopLevel.status).toBe('DESCRIPTOR_FOUND');
+      expect(intentValidTopLevel.provenance).toBe('LIVE_REGISTRY');
+      expect(intentValidTopLevel.intentDisplay).toBe('Transfer 1000 to 0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45');
+
+      // 9. Registry returning descriptor with mismatched contract address
+      const registryWrongAddress = new LiveRegistryERC7730Adapter({
+        registryUrl: 'https://registry.erc7730.org',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              schemaVersion: '2.0.0',
+              id: 'test.descriptor',
+              functionName: 'transfer',
+              context: { contract: 'USDC', chainId: 1, address: ROUTER }, // Wrong contract address!
+              expectedFields: ['to', 'amount'],
+              display: { formats: { intent: 'Transfer {amount} to {to}' } },
+            }),
+            { status: 200 }
+          ),
+      });
+      const intentWrongAddress = await registryWrongAddress.resolveIntent(USDC, 1, '0xa9059cbb', {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      });
+      expect(intentWrongAddress.status).toBe('DESCRIPTOR_ABSENT');
+      expect(intentWrongAddress.provenance).toBe('LIVE_REGISTRY');
+
+      // 10. Registry returning descriptor with missing or invalid display.formats.intent
+      const registryMissingIntent = new LiveRegistryERC7730Adapter({
+        registryUrl: 'https://registry.erc7730.org',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              schemaVersion: '2.0.0',
+              id: 'test.descriptor',
+              functionName: 'transfer',
+              context: { contract: 'USDC', chainId: 1, address: USDC },
+              expectedFields: ['to', 'amount'],
+              display: { formats: {} }, // missing intent!
+            }),
+            { status: 200 }
+          ),
+      });
+      const intentMissingIntent = await registryMissingIntent.resolveIntent(USDC, 1, '0xa9059cbb', {
+        status: 'DECODED',
+        functionName: 'transfer',
+        signature: 'transfer(address,uint256)',
+        args: { to: ROUTER, amount: '1000' },
+        callTree: [],
+        detectedApprovals: [],
+        hasExactUnlimitedApproval: false,
+        hasHighValueApproval: false,
+      });
+      expect(intentMissingIntent.status).toBe('DESCRIPTOR_ABSENT');
+      expect(intentMissingIntent.provenance).toBe('LIVE_REGISTRY');
+
+      // 11. LiveRPCSimulationAdapter RPC timeout fails closed honestly
+      const timeoutAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: {
+          request: async () => new Promise((resolve) => setTimeout(resolve, 500)), // hangs longer than timeout
+        },
+        timeoutMs: 50,
+      });
+      const liveTx = createBaseType2Tx();
+      const commitment = computeCommitment(liveTx);
+      const timeoutRes = await timeoutAdapter.simulate(commitment.canonical);
+      expect(timeoutRes.status).toBe('UNAVAILABLE');
+      expect(timeoutRes.provenance).toBe('NONE');
+      expect(timeoutRes.revertReason).toContain('timed out');
+
+      // 12. LiveRPCSimulationAdapter with mismatched RPC backend chainId fails closed to UNAVAILABLE/NONE
+      const wrongChainRpcAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: {
+          request: async ({ method }: { method: string }) => {
+            if (method === 'eth_blockNumber') return '0x13d05fc';
+            if (method === 'eth_chainId') return '0x89'; // Polygon 137
+            if (method === 'eth_call') return '0x0000000000000000000000000000000000000000000000000000000000000001';
+            return '0x0';
+          },
+        },
+      });
+      const wrongChainRes = await wrongChainRpcAdapter.simulate(commitment.canonical); // tx is chain 1
+      expect(wrongChainRes.status).toBe('UNAVAILABLE');
+      expect(wrongChainRes.provenance).toBe('NONE');
+      expect(wrongChainRes.revertReason).toContain('does not match transaction chainId');
+    });
+
+    it('D-7: Network failure and malformed responses never become VERIFIED', async () => {
+      const failingPipeline = new EvidencePipeline({
+        contractAdapter: new LiveSourcifyContractAdapter({
+          apiUrl: 'https://sourcify.dev/server',
+          fetchFn: async () => {
+            throw new Error('fetch failed: ECONNREFUSED');
+          },
+        }),
+        erc7730Adapter: new LiveRegistryERC7730Adapter({
+          registryUrl: 'https://registry.erc7730.org',
+          fetchFn: async () => {
+            throw new Error('fetch failed: ECONNREFUSED');
+          },
+        }),
+        simulationAdapter: new LiveRPCSimulationAdapter({
+          rpcUrl: 'http://127.0.0.1:8545',
+          fetchFn: async () => {
+            throw new Error('fetch failed: ECONNREFUSED');
+          },
+        }),
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const wallet = new MockWalletProvider(1);
+      const proxy = new ActionProofProviderProxy(wallet, {
+        declaredAction: DECLARED_TRANSFER,
+        evidencePipeline: failingPipeline,
+        provenanceMode: 'PRODUCTION',
+      });
+
+      const liveTx = createBaseType2Tx();
+      const result = (await proxy.request({
+        method: 'eth_sendTransaction',
+        params: [liveTx],
+      })) as ActionProofResult;
+
+      expect(result.verdict).toBe('WARNING');
+      expect(result.verdict).not.toBe('VERIFIED');
+      expect(result.blockedBeforeForwarding).toBe(true);
+      expect(wallet.received.length).toBe(0);
+      expect(result.evidence?.contract.status).toBe('UNAVAILABLE');
+      expect(result.evidence?.simulation.status).toBe('UNAVAILABLE');
+      expect(result.evidence?.intent.status).toBe('UNAVAILABLE');
+    });
+
+    it('D-8: H1 Final Security Correction — Production trust boundary, Sourcify chain/negative validation, and RPC block handling', async () => {
+      // 1. Production Trust Boundary: createLiveEvidencePipeline rejects custom adapter and policy injection
+      const fakeContractAdapter = {
+        getContractEvidence: async () => ({
+          status: 'VERIFIED_CORRESPONDENCE' as const,
+          provenance: 'LIVE_EXTERNAL' as const,
+          sourceDescription: 'manufactured live external',
+          address: USDC,
+          matchType: 'FULL_MATCH' as const,
+          contractName: 'Fake',
+          compiler: '0.8.0',
+          disclaimer: 'none',
+        }),
+      };
+
+      expect(() =>
+        createLiveEvidencePipeline({ contractProvider: fakeContractAdapter } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'contractProvider'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ contractAdapter: fakeContractAdapter } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'contractAdapter'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ simulationAdapter: {} as any } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'simulationAdapter'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ intentProvider: {} as any } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'intentProvider'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ erc7730Adapter: {} as any } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'erc7730Adapter'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ provenanceMode: 'DEMO' } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'provenanceMode'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ requireLiveSimulation: false } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'requireLiveSimulation'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ requireLiveContractVerification: false } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'requireLiveContractVerification'/);
+
+      // 1b. Production Trust Boundary: rejects mock transport injection
+      expect(() =>
+        createLiveEvidencePipeline({ rpcProvider: {} as any } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'rpcProvider'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ sourcifyFetchFn: (() => {}) as any } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'sourcifyFetchFn'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ rpcFetchFn: (() => {}) as any } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'rpcFetchFn'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ registryFetchFn: (() => {}) as any } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'registryFetchFn'/);
+
+      expect(() =>
+        createLiveEvidencePipeline({ fetchFn: (() => {}) as any } as unknown as LiveEvidencePipelineOptions)
+      ).toThrow(/rejected custom transport or adapter injection 'fetchFn'/);
+
+      // 1c. Production factory cannot reach VERIFIED using fixture/mock evidence alone
+      const prodPipeline = createLiveEvidencePipeline({
+        sourcifyApiUrl: 'http://127.0.0.1:54321',
+        rpcUrl: 'http://127.0.0.1:54321',
+        registryUrl: 'http://127.0.0.1:54321',
+      });
+      const prodResult = await prodPipeline.runPipeline(
+        computeCommitment(createBaseType2Tx()).canonical,
+        computeCommitment(createBaseType2Tx()),
+        DECLARED_TRANSFER
+      );
+      expect(prodResult.policy.verdict).not.toBe('VERIFIED');
+      expect(prodResult.policy.verdict).toBe('WARNING');
+
+      // 2. Sourcify Chain Mismatch: response supplies chainIds that do not match requested chainId
+      const sourcifyWrongChain = new LiveSourcifyContractAdapter({
+        apiUrl: 'https://sourcify.dev/server',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify([
+              {
+                address: USDC,
+                status: 'perfect',
+                chainIds: [137], // Polygon 137, but requested chain is 1
+              },
+            ]),
+            { status: 200 }
+          ),
+      });
+      const wrongChainRes = await sourcifyWrongChain.getContractEvidence(USDC, 1);
+      expect(wrongChainRes.status).toBe('UNAVAILABLE');
+      expect(wrongChainRes.provenance).toBe('NONE');
+      expect(wrongChainRes.sourceDescription).toContain('do not include requested chainId 1');
+
+      // 3. Sourcify Missing Address Record: response is valid JSON array but contains no record for requested address
+      const sourcifyMissingRecord = new LiveSourcifyContractAdapter({
+        apiUrl: 'https://sourcify.dev/server',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify([
+              {
+                address: ROUTER, // Different address!
+                status: 'perfect',
+                chainIds: [1],
+              },
+            ]),
+            { status: 200 }
+          ),
+      });
+      const missingRecordRes = await sourcifyMissingRecord.getContractEvidence(USDC, 1);
+      expect(missingRecordRes.status).toBe('UNAVAILABLE');
+      expect(missingRecordRes.provenance).toBe('NONE');
+      expect(missingRecordRes.sourceDescription).toContain('does not contain a record for requested address');
+
+      // 4. Sourcify Malformed chainIds
+      // 4a. chainIds is not an array
+      const sourcifyMalformedChain1 = new LiveSourcifyContractAdapter({
+        apiUrl: 'https://sourcify.dev/server',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify([
+              {
+                address: USDC,
+                status: 'perfect',
+                chainIds: 'not-an-array',
+              },
+            ]),
+            { status: 200 }
+          ),
+      });
+      const malformedChainRes1 = await sourcifyMalformedChain1.getContractEvidence(USDC, 1);
+      expect(malformedChainRes1.status).toBe('UNAVAILABLE');
+      expect(malformedChainRes1.provenance).toBe('NONE');
+      expect(malformedChainRes1.sourceDescription).toContain('malformed chainIds property');
+
+      // 4b. chainIds contains invalid non-numeric element
+      const sourcifyMalformedChain2 = new LiveSourcifyContractAdapter({
+        apiUrl: 'https://sourcify.dev/server',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify([
+              {
+                address: USDC,
+                status: 'perfect',
+                chainIds: ['abc'],
+              },
+            ]),
+            { status: 200 }
+          ),
+      });
+      const malformedChainRes2 = await sourcifyMalformedChain2.getContractEvidence(USDC, 1);
+      expect(malformedChainRes2.status).toBe('UNAVAILABLE');
+      expect(malformedChainRes2.provenance).toBe('NONE');
+      expect(malformedChainRes2.sourceDescription).toContain('malformed chain ID in response chainIds array');
+
+      // 4c. chainIds is empty array
+      const sourcifyEmptyChains = new LiveSourcifyContractAdapter({
+        apiUrl: 'https://sourcify.dev/server',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify([
+              {
+                address: USDC,
+                status: 'perfect',
+                chainIds: [],
+              },
+            ]),
+            { status: 200 }
+          ),
+      });
+      const emptyChainsRes = await sourcifyEmptyChains.getContractEvidence(USDC, 1);
+      expect(emptyChainsRes.status).toBe('UNAVAILABLE');
+      expect(emptyChainsRes.provenance).toBe('NONE');
+      expect(emptyChainsRes.sourceDescription).toContain('do not include requested chainId 1');
+
+      // 5. Sourcify Valid Negative Verification: status is 'false' with matching chainId
+      const sourcifyValidNegative = new LiveSourcifyContractAdapter({
+        apiUrl: 'https://sourcify.dev/server',
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify([
+              {
+                address: ATTACKER,
+                status: 'false',
+                chainIds: ['1'], // string numeric chainId
+              },
+            ]),
+            { status: 200 }
+          ),
+      });
+      const validNegativeRes = await sourcifyValidNegative.getContractEvidence(ATTACKER, 1);
+      expect(validNegativeRes.status).toBe('UNVERIFIED');
+      expect(validNegativeRes.provenance).toBe('LIVE_EXTERNAL');
+      expect(validNegativeRes.matchType).toBe('NONE');
+      expect(validNegativeRes.sourceDescription).toContain('Sourcify live lookup confirmed: contract source code is unverified');
+
+      // 6. LiveRPCSimulationAdapter eth_blockNumber Failure fails closed and never calls eth_call on 'latest'
+      const rpcCallsMade: string[] = [];
+      const failBlockNumberAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: {
+          request: async ({ method }: { method: string }) => {
+            rpcCallsMade.push(method);
+            if (method === 'eth_blockNumber') {
+              throw new Error('RPC server node error: eth_blockNumber unavailable');
+            }
+            if (method === 'eth_chainId') return '0x1';
+            if (method === 'eth_call') return '0x0000000000000000000000000000000000000000000000000000000000000001';
+            return '0x0';
+          },
+        },
+      });
+
+      const liveTx = createBaseType2Tx();
+      const commitment = computeCommitment(liveTx);
+      const failBlockRes = await failBlockNumberAdapter.simulate(commitment.canonical);
+
+      expect(failBlockRes.status).toBe('UNAVAILABLE');
+      expect(failBlockRes.provenance).toBe('NONE');
+      expect(failBlockRes.blockNumber).toBeNull();
+      expect(failBlockRes.success).toBe(false);
+      expect(failBlockRes.revertReason).toContain('eth_blockNumber query failed');
+      // Critical check: eth_call was NEVER called, and simulation did NOT continue with 'latest'
+      expect(rpcCallsMade).toEqual(['eth_blockNumber']);
+      expect(rpcCallsMade).not.toContain('eth_call');
+
+      // 7. LiveRPCSimulationAdapter with non-numeric eth_blockNumber fails closed
+      const malformedBlockAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: {
+          request: async ({ method }: { method: string }) => {
+            if (method === 'eth_blockNumber') return 'not_hex_or_number';
+            return '0x1';
+          },
+        },
+      });
+      const malformedBlockRes = await malformedBlockAdapter.simulate(commitment.canonical);
+      expect(malformedBlockRes.status).toBe('UNAVAILABLE');
+      expect(malformedBlockRes.provenance).toBe('NONE');
+      expect(malformedBlockRes.revertReason).toContain('eth_blockNumber returned malformed or non-numeric block number');
+
+      // 8. LiveRPCSimulationAdapter with invalid configured blockNumber fails closed
+      const invalidConfigBlockAdapter = new LiveRPCSimulationAdapter({
+        rpcProvider: {
+          request: async () => '0x1',
+        },
+        blockNumber: -1,
+      });
+      const invalidConfigRes = await invalidConfigBlockAdapter.simulate(commitment.canonical);
+      expect(invalidConfigRes.status).toBe('UNAVAILABLE');
+      expect(invalidConfigRes.provenance).toBe('NONE');
+      expect(invalidConfigRes.revertReason).toContain('invalid configured blockNumber -1');
+    });
+  });
 });
+
