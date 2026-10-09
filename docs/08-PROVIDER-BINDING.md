@@ -98,7 +98,7 @@ Objects containing nested structures (such as `accessList` arrays containing add
 
 ## 4. Pre-Forward Commitment Recheck & Canonical Serialization
 
-The pre-forward commitment recheck and canonical RPC serialization are executed in-line within `ActionProofProviderProxy.executeSendTransaction()` in [`src/provider/proxy.ts`](file:///C:/Coding/Projects/Crypto_Fair/src/provider/proxy.ts):
+The pre-forward commitment recheck and canonical RPC serialization are executed in-line within `ActionProofProviderProxy.executeSendTransaction()` in [`src/provider/proxy.ts`](../src/provider/proxy.ts):
 
 ```typescript
 // 1. Create an immutable verified forwarding snapshot immediately prior to pre-forward recheck.
