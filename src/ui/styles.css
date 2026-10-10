@@ -2021,6 +2021,24 @@ body {
   flex-shrink: 0;
 }
 
+.sim-pill-live {
+  background: #064e3b;
+  color: #6ee7b7;
+}
+
+.sim-pill-degraded {
+  background: #451a03;
+  color: #fcd34d;
+}
+
+.sim-rpc-code {
+  color: #a78bfa;
+}
+
+.ev-field-mt {
+  margin-top: 0.5rem;
+}
+
 .sim-details-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -287,43 +287,133 @@ export class LiveRegistryERC7730Adapter implements IntentProvider {
     const fetchFn = this.config.fetchFn ?? globalThis.fetch;
     const timeoutMs = this.config.timeoutMs ?? 5000;
     const baseUrl = this.config.registryUrl.replace(/\/$/, '');
-    const endpoint = baseUrl.includes('?')
-      ? `${baseUrl}&address=${normalizedTarget}&chainId=${chainId}`
-      : `${baseUrl}/${chainId}/${normalizedTarget}.json`;
 
     try {
-      const res = await fetchFn(endpoint, {
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      let json: unknown;
 
-      if (res.status === 404) {
-        return {
-          status: 'DESCRIPTOR_ABSENT',
-          provenance: 'LIVE_REGISTRY',
-          schemaVersion: '2.0.0',
-          descriptorId: null,
-          intentDisplay: null,
-          matchedFields: null,
-          crossValidation: { performed: false, matches: false, discrepancies: [] },
-          disclaimer: MANDATORY_INTENT_DISCLAIMER,
-        };
+      if (baseUrl.includes('githubusercontent.com') || baseUrl.includes('clear-signing-erc7730-registry')) {
+        // Query official ERC-7730 registry index: eip155:{chainId}:{address}
+        const indexEndpoint = `${baseUrl}/index.calldata.json`;
+        const idxRes = await fetchFn(indexEndpoint, {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+
+        if (idxRes.status === 404) {
+          return {
+            status: 'DESCRIPTOR_ABSENT',
+            provenance: 'LIVE_REGISTRY',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        if (!idxRes.ok) {
+          return {
+            status: 'UNAVAILABLE',
+            provenance: 'NONE',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        const indexData = (await idxRes.json()) as Record<string, string>;
+        const indexKey = `eip155:${chainId}:${normalizedTarget}`;
+        const descriptorRelPath = indexData?.[indexKey];
+
+        if (!descriptorRelPath || typeof descriptorRelPath !== 'string') {
+          return {
+            status: 'DESCRIPTOR_ABSENT',
+            provenance: 'LIVE_REGISTRY',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        const descriptorEndpoint = `${baseUrl}/${descriptorRelPath}`;
+        const descRes = await fetchFn(descriptorEndpoint, {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+
+        if (descRes.status === 404) {
+          return {
+            status: 'DESCRIPTOR_ABSENT',
+            provenance: 'LIVE_REGISTRY',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        if (!descRes.ok) {
+          return {
+            status: 'UNAVAILABLE',
+            provenance: 'NONE',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        json = (await descRes.json()) as unknown;
+      } else {
+        const endpoint = baseUrl.includes('?')
+          ? `${baseUrl}&address=${normalizedTarget}&chainId=${chainId}`
+          : `${baseUrl}/${chainId}/${normalizedTarget}.json`;
+
+        const res = await fetchFn(endpoint, {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+
+        if (res.status === 404) {
+          return {
+            status: 'DESCRIPTOR_ABSENT',
+            provenance: 'LIVE_REGISTRY',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        if (!res.ok) {
+          return {
+            status: 'UNAVAILABLE',
+            provenance: 'NONE',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        json = (await res.json()) as unknown;
       }
 
-      if (!res.ok) {
-        return {
-          status: 'UNAVAILABLE',
-          provenance: 'NONE',
-          schemaVersion: '2.0.0',
-          descriptorId: null,
-          intentDisplay: null,
-          matchedFields: null,
-          crossValidation: { performed: false, matches: false, discrepancies: [] },
-          disclaimer: MANDATORY_INTENT_DISCLAIMER,
-        };
-      }
-
-      const json = (await res.json()) as unknown;
       if (!json || typeof json !== 'object') {
         return {
           status: 'UNAVAILABLE',
@@ -338,7 +428,86 @@ export class LiveRegistryERC7730Adapter implements IntentProvider {
       }
 
       let descriptor: ERC7730DescriptorV2 | undefined;
+
+      // Check standard official ERC-7730 schema (with context.contract.deployments & display.formats)
+      const officialCandidate = json as {
+        context?: { contract?: { deployments?: Array<{ chainId?: number; address?: string }> }; '$id'?: string };
+        metadata?: { contractName?: string };
+        display?: { formats?: Record<string, { '$id'?: string; intent?: string; fields?: Array<{ path?: string }> }> };
+      };
+
       if (
+        decodeEvidence.functionName &&
+        officialCandidate.context?.contract?.deployments &&
+        Array.isArray(officialCandidate.context.contract.deployments) &&
+        officialCandidate.display?.formats
+      ) {
+        const matchingDeployment = officialCandidate.context.contract.deployments.find(
+          (d) => Number(d.chainId) === chainId && typeof d.address === 'string' && d.address.toLowerCase() === normalizedTarget
+        );
+
+        if (!matchingDeployment) {
+          return {
+            status: 'DESCRIPTOR_ABSENT',
+            provenance: 'LIVE_REGISTRY',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        let matchingFormat: { '$id'?: string; intent?: string; fields?: Array<{ path?: string }> } | undefined;
+        for (const [fmtKey, fmtVal] of Object.entries(officialCandidate.display.formats)) {
+          if (fmtKey === decodeEvidence.functionName || fmtKey.startsWith(`${decodeEvidence.functionName}(`)) {
+            matchingFormat = fmtVal;
+            break;
+          }
+        }
+
+        if (!matchingFormat) {
+          return {
+            status: 'DESCRIPTOR_ABSENT',
+            provenance: 'LIVE_REGISTRY',
+            schemaVersion: '2.0.0',
+            descriptorId: null,
+            intentDisplay: null,
+            matchedFields: null,
+            crossValidation: { performed: false, matches: false, discrepancies: [] },
+            disclaimer: MANDATORY_INTENT_DISCLAIMER,
+          };
+        }
+
+        const expectedFields: string[] = [];
+        if (Array.isArray(matchingFormat.fields)) {
+          for (const f of matchingFormat.fields) {
+            if (typeof f?.path === 'string') {
+              expectedFields.push(f.path.replace(/^params\./, ''));
+            }
+          }
+        }
+
+        descriptor = {
+          schemaVersion: '2.0.0',
+          id: (matchingFormat['$id'] as string) ?? `${officialCandidate.metadata?.contractName ?? 'contract'}.${decodeEvidence.functionName}`,
+          functionName: decodeEvidence.functionName,
+          context: {
+            contract: officialCandidate.metadata?.contractName ?? 'Contract',
+            chainId,
+            address: normalizedTarget,
+          },
+          expectedFields,
+          display: {
+            formats: {
+              intent: typeof matchingFormat.intent === 'string'
+                ? matchingFormat.intent
+                : `${decodeEvidence.functionName}(...)`,
+            },
+          },
+        };
+      } else if (
         decodeEvidence.functionName &&
         typeof json === 'object' &&
         json !== null &&

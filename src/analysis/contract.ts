@@ -100,16 +100,47 @@ export class SourcifyContractAdapter implements ContractEvidenceProvider {
 
     // 2. Attempt live Sourcify lookup if network is available
     try {
-      const res = await fetch(`${this.apiUrl}/check-by-addresses?addresses=${normalized}&chainIds=${chainId}`, {
-        headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(2000),
+      const baseUrl = this.apiUrl.replace(/\/$/, '');
+      const endpoint = baseUrl.includes('/v2')
+        ? `${baseUrl}/contract/${chainId}/${normalized}?fields=abi,metadata`
+        : `${baseUrl}/v2/contract/${chainId}/${normalized}?fields=abi,metadata`;
+
+      const res = await fetch(endpoint, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'ActionProof/1.0.0 (https://actionproof-etr.pages.dev)',
+        },
+        signal: AbortSignal.timeout(3000),
       });
 
-      if (!res.ok) {
+      if (res.status === 404) {
+        try {
+          const errData = (await res.json()) as Record<string, unknown>;
+          if (
+            errData &&
+            errData.match === null &&
+            typeof errData.address === 'string' &&
+            errData.address.toLowerCase() === normalized
+          ) {
+            return {
+              status: 'UNVERIFIED',
+              provenance: 'LIVE_EXTERNAL',
+              sourceDescription: 'Sourcify live lookup confirmed: contract source code is unverified',
+              address,
+              matchType: 'NONE',
+              contractName: null,
+              compiler: null,
+              disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+              abi: null,
+            };
+          }
+        } catch {
+          // not structured unverified JSON
+        }
         return {
           status: 'UNAVAILABLE',
           provenance: 'NONE',
-          sourceDescription: 'Sourcify verification service returned HTTP error',
+          sourceDescription: `Sourcify verification service returned HTTP error ${res.status}`,
           address,
           matchType: 'NONE',
           contractName: null,
@@ -118,27 +149,59 @@ export class SourcifyContractAdapter implements ContractEvidenceProvider {
         };
       }
 
-      const data = (await res.json()) as SourcifyCheckItem[];
-      const match = data?.[0];
-
-      if (match?.status === 'perfect') {
+      if (!res.ok) {
         return {
-          status: 'VERIFIED_CORRESPONDENCE',
-          provenance: 'LIVE_EXTERNAL',
-          sourceDescription: 'verified source/bytecode correspondence from Sourcify',
+          status: 'UNAVAILABLE',
+          provenance: 'NONE',
+          sourceDescription: `Sourcify verification service returned HTTP error ${res.status}`,
           address,
-          matchType: 'FULL_MATCH',
+          matchType: 'NONE',
           contractName: null,
           compiler: null,
           disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
         };
-      } else if (match?.status === 'partial') {
+      }
+
+      const data = (await res.json()) as Record<string, unknown>;
+      const matchStatus = data.match ?? data.runtimeMatch;
+
+      const isFull = matchStatus === 'exact_match' || matchStatus === 'perfect';
+      const isPartial = matchStatus === 'match' || matchStatus === 'partial';
+
+      if (isFull || isPartial) {
+        let contractName: string | null = null;
+        const metadata = data.metadata as { settings?: { compilationTarget?: Record<string, string> }; compiler?: { version?: string } } | undefined;
+        if (metadata?.settings?.compilationTarget) {
+          const targets = Object.values(metadata.settings.compilationTarget);
+          if (targets.length > 0 && typeof targets[0] === 'string') {
+            contractName = targets[0];
+          }
+        }
+        const compiler = (typeof data.compilerVersion === 'string' ? data.compilerVersion : metadata?.compiler?.version) ?? null;
+        const abi = Array.isArray(data.abi) ? data.abi : null;
+
         return {
           status: 'VERIFIED_CORRESPONDENCE',
           provenance: 'LIVE_EXTERNAL',
-          sourceDescription: 'verified partial source/bytecode correspondence from Sourcify',
+          sourceDescription: isFull
+            ? 'verified source/bytecode correspondence from Sourcify (exact match)'
+            : 'verified partial source/bytecode correspondence from Sourcify (match)',
           address,
-          matchType: 'PARTIAL_MATCH',
+          matchType: isFull ? 'FULL_MATCH' : 'PARTIAL_MATCH',
+          contractName,
+          compiler,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          abi,
+        };
+      }
+
+      if (matchStatus === null || matchStatus === 'false') {
+        return {
+          status: 'UNVERIFIED',
+          provenance: 'LIVE_EXTERNAL',
+          sourceDescription: 'unverified contract on Sourcify',
+          address,
+          matchType: 'NONE',
           contractName: null,
           compiler: null,
           disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
@@ -146,9 +209,9 @@ export class SourcifyContractAdapter implements ContractEvidenceProvider {
       }
 
       return {
-        status: 'UNVERIFIED',
+        status: 'UNAVAILABLE',
         provenance: 'NONE',
-        sourceDescription: 'unverified contract on Sourcify',
+        sourceDescription: `Sourcify verification service returned unrecognized status '${String(matchStatus)}'`,
         address,
         matchType: 'NONE',
         contractName: null,
@@ -262,13 +325,56 @@ export class LiveSourcifyContractAdapter implements ContractEvidenceProvider {
     const apiUrl = (this.config.apiUrl ?? 'https://sourcify.dev/server').replace(/\/$/, '');
     const fetchFn = this.config.fetchFn ?? globalThis.fetch;
     const timeoutMs = this.config.timeoutMs ?? 5000;
-    const endpoint = `${apiUrl}/check-by-addresses?addresses=${normalized}&chainIds=${chainId}`;
+    const endpoint = apiUrl.includes('/v2')
+      ? `${apiUrl}/contract/${chainId}/${normalized}?fields=abi,metadata`
+      : `${apiUrl}/v2/contract/${chainId}/${normalized}?fields=abi,metadata`;
 
     try {
       const res = await fetchFn(endpoint, {
-        headers: { Accept: 'application/json' },
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'ActionProof/1.0.0 (https://actionproof-etr.pages.dev)',
+        },
         signal: AbortSignal.timeout(timeoutMs),
       });
+
+      if (res.status === 404) {
+        try {
+          const errData = (await res.json()) as Record<string, unknown>;
+          if (
+            errData &&
+            typeof errData === 'object' &&
+            errData.match === null &&
+            typeof errData.address === 'string' &&
+            errData.address.toLowerCase() === normalized &&
+            (errData.chainId === undefined || Number(errData.chainId) === chainId)
+          ) {
+            return {
+              status: 'UNVERIFIED',
+              provenance: 'LIVE_EXTERNAL',
+              sourceDescription: 'Sourcify live lookup confirmed: contract source code is unverified',
+              address,
+              matchType: 'NONE',
+              contractName: null,
+              compiler: null,
+              disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+              abi: null,
+            };
+          }
+        } catch {
+          // not structured unverified JSON
+        }
+        return {
+          status: 'UNAVAILABLE',
+          provenance: 'NONE',
+          sourceDescription: `Sourcify live lookup failed: HTTP error ${res.status}`,
+          address,
+          matchType: 'NONE',
+          contractName: null,
+          compiler: null,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+        };
+      }
 
       if (!res.ok) {
         return {
@@ -284,7 +390,114 @@ export class LiveSourcifyContractAdapter implements ContractEvidenceProvider {
       }
 
       const json = (await res.json()) as unknown;
-      if (!Array.isArray(json) || json.length === 0) {
+      if (!json || (typeof json !== 'object' && !Array.isArray(json))) {
+        return {
+          status: 'UNAVAILABLE',
+          provenance: 'NONE',
+          sourceDescription: 'Sourcify live lookup failed: response is not a valid object or array of check results',
+          address,
+          matchType: 'NONE',
+          contractName: null,
+          compiler: null,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+        };
+      }
+
+      // Handle Sourcify v2 object response
+      if (!Array.isArray(json)) {
+        const v2 = json as Record<string, unknown>;
+        if (!('address' in v2) || typeof v2.address !== 'string' || v2.address.toLowerCase() !== normalized) {
+          return {
+            status: 'UNAVAILABLE',
+            provenance: 'NONE',
+            sourceDescription: 'Sourcify live lookup failed: response does not contain a record for requested address',
+            address,
+            matchType: 'NONE',
+            contractName: null,
+            compiler: null,
+            disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          };
+        }
+
+        if ('chainId' in v2) {
+          const parsedChainId = typeof v2.chainId === 'number' ? v2.chainId : parseInt(String(v2.chainId), 10);
+          if (isNaN(parsedChainId) || parsedChainId !== chainId) {
+            return {
+              status: 'UNAVAILABLE',
+              provenance: 'NONE',
+              sourceDescription: `Sourcify live lookup failed: response chainId ${String(v2.chainId)} does not match requested chainId ${chainId}`,
+              address,
+              matchType: 'NONE',
+              contractName: null,
+              compiler: null,
+              disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+            };
+          }
+        }
+
+        if (v2.match === null || v2.status === 'false') {
+          return {
+            status: 'UNVERIFIED',
+            provenance: 'LIVE_EXTERNAL',
+            sourceDescription: 'Sourcify live lookup confirmed: contract source code is unverified',
+            address,
+            matchType: 'NONE',
+            contractName: null,
+            compiler: null,
+            disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+            abi: null,
+          };
+        }
+
+        const matchStatus = v2.match ?? v2.runtimeMatch ?? v2.status;
+        const isFull = matchStatus === 'exact_match' || matchStatus === 'perfect';
+        const isPartial = matchStatus === 'match' || matchStatus === 'partial';
+
+        if (!isFull && !isPartial) {
+          return {
+            status: 'UNAVAILABLE',
+            provenance: 'NONE',
+            sourceDescription: `Sourcify live lookup failed: unrecognized verification status '${String(matchStatus)}'`,
+            address,
+            matchType: 'NONE',
+            contractName: null,
+            compiler: null,
+            disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          };
+        }
+
+        let contractName: string | null = null;
+        const metadata = v2.metadata as { settings?: { compilationTarget?: Record<string, string> }; compiler?: { version?: string } } | undefined;
+        if (metadata?.settings?.compilationTarget && typeof metadata.settings.compilationTarget === 'object') {
+          const targets = Object.values(metadata.settings.compilationTarget);
+          if (targets.length > 0 && typeof targets[0] === 'string') {
+            contractName = targets[0];
+          }
+        }
+        if (!contractName && typeof v2.name === 'string') contractName = v2.name;
+        if (!contractName && typeof v2.contractName === 'string') contractName = v2.contractName;
+
+        const compiler = (typeof v2.compilerVersion === 'string' ? v2.compilerVersion : metadata?.compiler?.version) ?? null;
+        const abi = Array.isArray(v2.abi) ? v2.abi : null;
+
+        return {
+          status: 'VERIFIED_CORRESPONDENCE',
+          provenance: 'LIVE_EXTERNAL',
+          sourceDescription: isFull
+            ? 'Sourcify live verified source/bytecode correspondence (perfect match)'
+            : 'Sourcify live verified source/bytecode correspondence (partial match)',
+          address,
+          matchType: isFull ? 'FULL_MATCH' : 'PARTIAL_MATCH',
+          contractName,
+          compiler,
+          disclaimer: MANDATORY_CONTRACT_DISCLAIMER,
+          decimals: null,
+          abi,
+        };
+      }
+
+      // Handle Legacy array format
+      if (json.length === 0) {
         return {
           status: 'UNAVAILABLE',
           provenance: 'NONE',

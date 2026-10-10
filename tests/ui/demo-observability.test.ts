@@ -126,4 +126,61 @@ describe('Demo UX & Execution Observability Tests', () => {
     expect(runner.state.walletTxs.length).toBe(0);
     expect(runner.wallet.received.length).toBe(0);
   });
+
+  it('7. In-flight execution blocks concurrent execute(), setMode(), selectScenario(), and resetDemo()', async () => {
+    const runner = new DemoRunner(DEMO_SCENARIOS[0]);
+
+    // Start execute (which is an async promise)
+    const execPromise = runner.execute();
+
+    // While running:
+    expect(runner.state.status).toBe('RUNNING');
+
+    // Attempting to change mode while executing must be ignored
+    runner.setMode('LIVE');
+    expect(runner.state.mode).toBe('DEMO');
+
+    // Attempting to select scenario while executing must be ignored
+    runner.selectScenario(DEMO_SCENARIOS[1]);
+    expect(runner.state.selectedScenario.id).toBe(DEMO_SCENARIOS[0].id);
+
+    // Attempting to reset demo while executing must be ignored
+    runner.resetDemo();
+    expect(runner.state.status).toBe('RUNNING');
+
+    // Attempting concurrent execute() throws
+    await expect(runner.execute()).rejects.toThrow('Execution already in progress');
+
+    // Wait for initial execution to complete
+    const res = await execPromise;
+    expect(runner.state.status).toBe('COMPLETED');
+    expect(res.verdict).toBe('DEMO_VERIFIED');
+
+    // After completion, setMode is unblocked
+    runner.setMode('LIVE');
+    expect(runner.state.mode).toBe('LIVE');
+  });
+
+  it('8. Setup failure during execute() catches error and releases the execution lock', async () => {
+    const faultyScenario = {
+      ...DEMO_SCENARIOS[0],
+      getRequest: () => {
+        throw new Error('Malformed scenario request generator');
+      },
+    };
+
+    const runner = new DemoRunner(faultyScenario);
+    const res = await runner.execute();
+
+    expect(res.verdict).toBe('BLOCKED');
+    expect(res.reason).toBe('UNHANDLED_EXCEPTION');
+    expect(res.detail).toContain('Malformed scenario request generator');
+    expect(runner.state.status).toBe('COMPLETED');
+
+    // Runner must be unblocked and able to setMode or execute again
+    runner.setMode('LIVE');
+    expect(runner.state.mode).toBe('LIVE');
+    runner.resetDemo();
+    expect(runner.state.status).toBe('READY');
+  });
 });

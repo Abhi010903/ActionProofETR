@@ -219,3 +219,27 @@ export function createLiveEvidencePipeline(options: LiveEvidencePipelineOptions 
   });
 }
 
+export const DEFAULT_PUBLIC_ENDPOINTS: Readonly<Required<Omit<LiveEvidencePipelineOptions, 'rpcTimeoutMs'>> & { rpcTimeoutMs: number }> = Object.freeze({
+  sourcifyApiUrl: 'https://sourcify.dev/server',
+  rpcUrl: 'https://rpc.mevblocker.io',
+  rpcTimeoutMs: 5000,
+  registryUrl: 'https://raw.githubusercontent.com/ethereum/clear-signing-erc7730-registry/master',
+});
+
+/**
+ * Creates an EvidencePipeline pre-configured with default free, public external evidence endpoints:
+ * - Sourcify v2 API for contract metadata and verified ABI
+ * - Ethereum public RPC for EVM execution simulation
+ * - Official Ethereum ERC-7730 clear-signing registry
+ * Still enforces strict PRODUCTION trust boundary: test doubles and mock transports are rejected.
+ */
+export function createPublicLiveEvidencePipeline(options: LiveEvidencePipelineOptions = {}): EvidencePipeline {
+  return createLiveEvidencePipeline({
+    ...options,
+    sourcifyApiUrl: options.sourcifyApiUrl ?? DEFAULT_PUBLIC_ENDPOINTS.sourcifyApiUrl,
+    rpcUrl: options.rpcUrl ?? DEFAULT_PUBLIC_ENDPOINTS.rpcUrl,
+    rpcTimeoutMs: options.rpcTimeoutMs ?? DEFAULT_PUBLIC_ENDPOINTS.rpcTimeoutMs,
+    registryUrl: options.registryUrl ?? DEFAULT_PUBLIC_ENDPOINTS.registryUrl,
+  });
+}
+

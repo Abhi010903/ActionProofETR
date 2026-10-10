@@ -24,6 +24,7 @@ export function App() {
     walletTxs,
     executionCount,
     lastExecutionTimestamp,
+    mode,
   } = state;
 
   const [activeSection, setActiveSection] = useState<NavSection>('CONSOLE');
@@ -119,6 +120,8 @@ export function App() {
             isRunning={isRunning}
             executionCount={executionCount}
             lastExecutionTimestamp={lastExecutionTimestamp}
+            mode={mode}
+            onToggleMode={(m) => runner.setMode(m)}
           />
 
           {/* Dominant Final Verdict / Standby Banner */}

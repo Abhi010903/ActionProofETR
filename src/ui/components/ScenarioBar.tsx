@@ -9,6 +9,8 @@ interface ScenarioBarProps {
   isRunning: boolean;
   executionCount: number;
   lastExecutionTimestamp: string | null;
+  mode?: 'DEMO' | 'LIVE';
+  onToggleMode?: (mode: 'DEMO' | 'LIVE') => void;
 }
 
 export const ScenarioBar: React.FC<ScenarioBarProps> = ({
@@ -18,6 +20,8 @@ export const ScenarioBar: React.FC<ScenarioBarProps> = ({
   isRunning,
   executionCount,
   lastExecutionTimestamp,
+  mode = 'DEMO',
+  onToggleMode,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -62,7 +66,43 @@ export const ScenarioBar: React.FC<ScenarioBarProps> = ({
           <span className="panel-tag">DEMO MATRIX</span>
           <h2 className="panel-title">Transaction Threat & Functional Scenarios</h2>
         </div>
-        <div className="panel-header-right">
+        <div className="panel-header-right" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          {onToggleMode && (
+            <div className="mode-toggle-pill" style={{ display: 'flex', background: '#0f172a', border: '1px solid #334155', borderRadius: '4px', overflow: 'hidden' }}>
+              <button
+                type="button"
+                style={{
+                  padding: '4px 10px',
+                  fontSize: '0.75rem',
+                  fontFamily: 'monospace',
+                  cursor: 'pointer',
+                  border: 'none',
+                  background: mode === 'DEMO' ? '#3b82f6' : 'transparent',
+                  color: mode === 'DEMO' ? '#ffffff' : '#94a3b8',
+                  fontWeight: mode === 'DEMO' ? 'bold' : 'normal',
+                }}
+                onClick={() => onToggleMode('DEMO')}
+              >
+                🧪 DEMO FIXTURES
+              </button>
+              <button
+                type="button"
+                style={{
+                  padding: '4px 10px',
+                  fontSize: '0.75rem',
+                  fontFamily: 'monospace',
+                  cursor: 'pointer',
+                  border: 'none',
+                  background: mode === 'LIVE' ? '#10b981' : 'transparent',
+                  color: mode === 'LIVE' ? '#ffffff' : '#94a3b8',
+                  fontWeight: mode === 'LIVE' ? 'bold' : 'normal',
+                }}
+                onClick={() => onToggleMode('LIVE')}
+              >
+                ⚡ LIVE RECONNAISSANCE
+              </button>
+            </div>
+          )}
           <span className="scenarios-legend">
             Select scenario &rarr; Inspect Staged Request &rarr; Execute Gate
           </span>

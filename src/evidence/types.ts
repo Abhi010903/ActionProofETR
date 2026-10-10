@@ -92,6 +92,7 @@ export interface ContractEvidence {
   compiler: string | null;
   disclaimer: string;
   decimals?: number | null;
+  abi?: unknown[] | null;
 }
 
 export interface DescriptorCrossValidation {

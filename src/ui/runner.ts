@@ -16,7 +16,7 @@ import {
   MockWalletProvider,
   type ActionProofResult,
 } from '../provider/index.js';
-import { EvidencePipeline } from '../evidence/pipeline.js';
+import { EvidencePipeline, createPublicLiveEvidencePipeline } from '../evidence/pipeline.js';
 import { LocalFixtureSimulationAdapter } from '../analysis/simulation.js';
 
 export interface DemoState {
@@ -26,12 +26,14 @@ export interface DemoState {
   walletTxs: Record<string, unknown>[];
   executionCount: number;
   lastExecutionTimestamp: string | null;
+  mode: 'DEMO' | 'LIVE';
 }
 
 export class DemoRunner {
   private _state: DemoState;
   private readonly _wallet: MockWalletProvider;
   private _listeners: (() => void)[] = [];
+  private _isExecuting: boolean = false;
 
   constructor(
     initialScenario: DemoScenario = DEMO_SCENARIOS[0],
@@ -45,6 +47,7 @@ export class DemoRunner {
       walletTxs: [],
       executionCount: 0,
       lastExecutionTimestamp: null,
+      mode: 'DEMO',
     };
   }
 
@@ -56,7 +59,21 @@ export class DemoRunner {
     return this._wallet;
   }
 
+  public setMode(mode: 'DEMO' | 'LIVE'): void {
+    if (this._isExecuting || this._state.status === 'RUNNING' || this._state.mode === mode) return;
+    this._state = {
+      ...this._state,
+      mode,
+      status: 'READY',
+      result: null,
+      walletTxs: [],
+      lastExecutionTimestamp: null,
+    };
+    this.notify();
+  }
+
   public selectScenario(scenario: DemoScenario): void {
+    if (this._isExecuting || this._state.status === 'RUNNING') return;
     this._wallet.reset();
     this._state = {
       ...this._state,
@@ -71,32 +88,15 @@ export class DemoRunner {
   }
 
   public async execute(): Promise<ActionProofResult> {
+    if (this._isExecuting || this._state.status === 'RUNNING') {
+      throw new Error('Execution already in progress');
+    }
+    this._isExecuting = true;
     this._state = {
       ...this._state,
       status: 'RUNNING',
     };
     this.notify();
-
-    this._wallet.reset();
-
-    const pipeline = new EvidencePipeline({
-      simulationAdapter: new LocalFixtureSimulationAdapter(),
-      provenanceMode: 'DEMO',
-      policyEngineOptions: { provenanceMode: 'DEMO' },
-    });
-
-    const proxy = new ActionProofProviderProxy(this._wallet, {
-      declaredAction: this._state.selectedScenario.declaredAction,
-      evidencePipeline: pipeline,
-      provenanceMode: 'DEMO',
-      barrier: async (liveTx) => {
-        if (this._state.selectedScenario.mutationHook) {
-          this._state.selectedScenario.mutationHook(liveTx);
-        }
-      },
-    });
-
-    const txObj = this._state.selectedScenario.getRequest();
 
     const now = new Date();
     const hours = String(now.getHours()).padStart(2, '0');
@@ -106,6 +106,30 @@ export class DemoRunner {
     const timestamp = `${hours}:${minutes}:${seconds}.${millis}`;
 
     try {
+      this._wallet.reset();
+
+      const isLive = this._state.mode === 'LIVE';
+      const pipeline = isLive
+        ? createPublicLiveEvidencePipeline()
+        : new EvidencePipeline({
+            simulationAdapter: new LocalFixtureSimulationAdapter(),
+            provenanceMode: 'DEMO',
+            policyEngineOptions: { provenanceMode: 'DEMO' },
+          });
+
+      const proxy = new ActionProofProviderProxy(this._wallet, {
+        declaredAction: this._state.selectedScenario.declaredAction,
+        evidencePipeline: pipeline,
+        provenanceMode: isLive ? 'PRODUCTION' : 'DEMO',
+        barrier: async (liveTx) => {
+          if (this._state.selectedScenario.mutationHook) {
+            this._state.selectedScenario.mutationHook(liveTx);
+          }
+        },
+      });
+
+      const txObj = this._state.selectedScenario.getRequest();
+
       const res = (await proxy.request({
         method: this._state.selectedScenario.method,
         params: [txObj],
@@ -141,10 +165,13 @@ export class DemoRunner {
       };
       this.notify();
       return res;
+    } finally {
+      this._isExecuting = false;
     }
   }
 
   public resetDemo(): void {
+    if (this._isExecuting || this._state.status === 'RUNNING') return;
     this._wallet.reset();
     this._state = {
       ...this._state,
