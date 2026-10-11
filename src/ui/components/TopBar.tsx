@@ -1,11 +1,15 @@
 import React from 'react';
-import { EthIcon, ShieldLockIcon, RefreshIcon, ActivityIcon } from '../icons.js';
+import { EthIcon, ShieldLockIcon, RefreshIcon, ActivityIcon, SunIcon, MoonIcon } from '../icons.js';
 
 interface TopBarProps {
   executionCount: number;
   verifiedCount: number;
   blockedCount: number;
   onReset: () => void;
+  theme?: 'day' | 'night';
+  onToggleTheme?: () => void;
+  mode?: 'DEMO' | 'LIVE';
+  onToggleMode?: (mode: 'DEMO' | 'LIVE') => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -13,6 +17,10 @@ export const TopBar: React.FC<TopBarProps> = ({
   verifiedCount,
   blockedCount,
   onReset,
+  theme = 'day',
+  onToggleTheme,
+  mode = 'DEMO',
+  onToggleMode,
 }) => {
   return (
     <header className="soc-topbar">
@@ -82,12 +90,44 @@ export const TopBar: React.FC<TopBarProps> = ({
             <span className="counter-label">RUNS</span>
           </div>
 
+          {onToggleMode && (
+            <div className="soc-topbar-mode-toggle" title="Toggle execution mode">
+              <button
+                type="button"
+                className={`mode-toggle-btn ${mode === 'DEMO' ? 'active-demo' : ''}`}
+                onClick={() => onToggleMode('DEMO')}
+              >
+                DEMO
+              </button>
+              <button
+                type="button"
+                className={`mode-toggle-btn ${mode === 'LIVE' ? 'active-live' : ''}`}
+                onClick={() => onToggleMode('LIVE')}
+              >
+                LIVE
+              </button>
+            </div>
+          )}
+
+          {onToggleTheme && (
+            <button
+              type="button"
+              className="soc-btn-theme"
+              onClick={onToggleTheme}
+              title={theme === 'day' ? 'Switch to Night mode' : 'Switch to Day mode'}
+              aria-label="Toggle day or night theme"
+            >
+              {theme === 'day' ? <MoonIcon size={13} /> : <SunIcon size={13} />}
+              <span>{theme === 'day' ? 'NIGHT' : 'DAY'}</span>
+            </button>
+          )}
+
           <button
             className="soc-btn-reset"
             onClick={onReset}
             title="Reset wallet state and execution history to READY"
           >
-            <RefreshIcon size={13} color="#cbd5e1" />
+            <RefreshIcon size={13} color="currentColor" />
             <span>RESET LAB</span>
           </button>
         </div>

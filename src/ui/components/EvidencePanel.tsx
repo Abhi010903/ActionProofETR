@@ -10,11 +10,13 @@ import {
 interface EvidencePanelProps {
   evidence?: CompleteEvidence;
   isReady: boolean;
+  section?: 'all' | 'identity' | 'simulation';
 }
 
 export const EvidencePanel: React.FC<EvidencePanelProps> = ({
   evidence,
   isReady,
+  section = 'all',
 }) => {
   const renderProvenanceTag = (
     prov?: string,
@@ -64,12 +66,22 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
     <section className="soc-panel soc-evidence-panel" id="section-evidence">
       <div className="panel-header">
         <div className="panel-header-left">
-          <span className="panel-tag tag-violet">INDEPENDENT RECONNAISSANCE</span>
-          <h2 className="panel-title">Multi-Domain Evidence Pipeline</h2>
+          <span className="panel-tag tag-violet">
+            {section === 'simulation' ? 'EVM EXECUTION RECON' : 'INDEPENDENT RECONNAISSANCE'}
+          </span>
+          <h2 className="panel-title">
+            {section === 'simulation'
+              ? 'EVM Execution Simulation Evidence'
+              : 'Multi-Domain Evidence Pipeline'}
+          </h2>
         </div>
         <div className="panel-header-right">
           <div className="evidence-truth-pill">
-            <span>PROVENANCE HONESTY: FIXTURES NEVER LABELED LIVE</span>
+            <span>
+              {section === 'simulation'
+                ? 'SIMULATION PROVENANCE: HONEST BLOCKCHAIN STATE'
+                : 'PROVENANCE HONESTY: FIXTURES NEVER LABELED LIVE'}
+            </span>
           </div>
         </div>
       </div>
@@ -77,14 +89,15 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
       {isReady || !evidence ? (
         <div className="evidence-empty-box">
           <CpuIcon size={24} color="#64748b" />
-          <p>Evidence gathering will execute across all 4 independent modules upon gate dispatch.</p>
+          <p>Evidence gathering will execute across all independent modules upon gate dispatch.</p>
           <span className="text-muted text-small">
             Modules: Sourcify Correspondence &bull; ERC-7730 Clear-Signing &bull; Deterministic Simulation &bull; ABI Decompiler
           </span>
         </div>
       ) : (
-        <div className="evidence-grid">
+        <div className={`evidence-grid ${section === 'simulation' ? 'simulation-only-grid' : ''}`}>
           {/* Card 1: Contract Identity (Sourcify) */}
+          {section !== 'simulation' && (
           <div className="soc-ev-card">
             <div className="ev-card-top">
               <div className="ev-card-title text-violet">
@@ -156,8 +169,10 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
               <span>{evidence.contract.disclaimer}</span>
             </div>
           </div>
+          )}
 
           {/* Card 2: ERC-7730 Clear-Signing v2 */}
+          {section !== 'simulation' && (
           <div className="soc-ev-card">
             <div className="ev-card-top">
               <div className="ev-card-title text-cyan">
@@ -227,9 +242,11 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
               <span>{evidence.intent.disclaimer}</span>
             </div>
           </div>
+          )}
 
           {/* Card 3: EVM Simulation Evidence */}
-          <div className="soc-ev-card card-span-2">
+          {section !== 'identity' && (
+          <div className={`soc-ev-card ${section === 'all' ? 'card-span-2' : ''}`}>
             <div className="ev-card-top">
               <div className="ev-card-title text-emerald">
                 <CpuIcon size={14} color="#34d399" />
@@ -331,6 +348,7 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
               <span>{evidence.simulation.disclaimer}</span>
             </div>
           </div>
+          )}
         </div>
       )}
     </section>
